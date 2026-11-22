@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,5 +92,42 @@ func TestConsumerCRUDAndScopeIsolation(t *testing.T) {
 	router.ServeHTTP(suspRec, suspReq)
 	if suspRec.Code != http.StatusOK {
 		t.Fatalf("expected 200 suspending consumer, got %d: %s", suspRec.Code, suspRec.Body.String())
+	}
+
+	// Issue one-time API key: plaintext returned ONCE, NEVER stored in DB or returned on GET readback.
+	issueReq := httptest.NewRequest(http.MethodPost, "/api/v1/orgs/"+boot.OrgID+"/consumers/"+c.ID+"/keys",
+		bytes.NewBufferString(`{"label":"ci-key","scopes":["orders:read"]}`))
+	issueReq.AddCookie(ownerCookie)
+	issueReq.Header.Set(auth.CSRFHeaderName, ownerCSRF)
+	issueRec := httptest.NewRecorder()
+	router.ServeHTTP(issueRec, issueReq)
+	if issueRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 issuing key, got %d: %s", issueRec.Code, issueRec.Body.String())
+	}
+	var issued api.IssuedAPIKeyResponse
+	_ = json.NewDecoder(issueRec.Body).Decode(&issued)
+	if !strings.HasPrefix(issued.APIKey, "gwf_") || len(issued.APIKey) < 64 {
+		t.Fatalf("expected high-entropy gwf_ api key, got %q", issued.APIKey)
+	}
+
+	// Readback via GET MUST NOT contain plaintext or hash.
+	listKeysReq := httptest.NewRequest(http.MethodGet, "/api/v1/orgs/"+boot.OrgID+"/consumers/"+c.ID+"/keys", nil)
+	listKeysReq.AddCookie(ownerCookie)
+	listKeysRec := httptest.NewRecorder()
+	router.ServeHTTP(listKeysRec, listKeysReq)
+	if listKeysRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 listing keys, got %d", listKeysRec.Code)
+	}
+	if strings.Contains(listKeysRec.Body.String(), issued.APIKey) {
+		t.Fatal("GET /keys leaked plaintext API key!")
+	}
+
+	// Direct DB check: stored key_hash must NOT equal plaintext.
+	var storedHash string
+	if err := pool.QueryRow(t.Context(), `SELECT key_hash FROM api_keys WHERE id = $1`, issued.ID).Scan(&storedHash); err != nil {
+		t.Fatalf("query key_hash: %v", err)
+	}
+	if storedHash == issued.APIKey || strings.Contains(storedHash, issued.APIKey) {
+		t.Fatal("plaintext API key was stored in PostgreSQL!")
 	}
 }

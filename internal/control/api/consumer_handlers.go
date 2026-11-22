@@ -12,6 +12,7 @@ import (
 	"github.com/YASSERRMD/GatewayForge/internal/control/auth"
 	"github.com/YASSERRMD/GatewayForge/internal/control/rbac"
 	"github.com/YASSERRMD/GatewayForge/internal/control/store"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/apikey"
 )
 
 // Consumer represents a tenant-scoped API consumer.
@@ -36,7 +37,7 @@ type ConsumerHandler struct {
 	OnKeyChanged func(r *http.Request, orgID string)
 }
 
-// MountConsumerRoutes registers /orgs/{orgId}/consumers routes under v1.
+// MountConsumerRoutes registers /orgs/{orgId}/consumers and /keys routes under v1.
 func (h *ConsumerHandler) MountConsumerRoutes(v1 chi.Router) {
 	v1.With(RequireAuth(h.Sessions), RequireOrgContext(h.Sessions), AuditMutationsMiddleware(h.Audit)).Route("/orgs/{orgId}/consumers", func(r chi.Router) {
 		r.With(RequirePermission(rbac.PermConsumerRead)).Get("/", h.handleListConsumers)
@@ -44,6 +45,8 @@ func (h *ConsumerHandler) MountConsumerRoutes(v1 chi.Router) {
 		r.With(RequirePermission(rbac.PermConsumerRead)).Get("/{consumerId}", h.handleGetConsumer)
 		r.With(RequirePermission(rbac.PermConsumerWrite)).Patch("/{consumerId}", h.handleUpdateConsumer)
 		r.With(RequirePermission(rbac.PermConsumerWrite)).Delete("/{consumerId}", h.handleDeleteConsumer)
+		r.With(RequirePermission(rbac.PermConsumerRead)).Get("/{consumerId}/keys", h.handleListConsumerKeys)
+		r.With(RequirePermission(rbac.PermKeyManage)).Post("/{consumerId}/keys", h.handleIssueAPIKey)
 	})
 }
 
@@ -277,4 +280,123 @@ func (h *ConsumerHandler) handleDeleteConsumer(w http.ResponseWriter, r *http.Re
 	}
 	_ = bumpDraftRevision(r.Context(), h.Store, orgCtx.OrgID, principal.UserID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// APIKeyMetadata exposes non-secret metadata only; NEVER includes plaintext or key_hash.
+type APIKeyMetadata struct {
+	ID         string     `json:"id"`
+	ConsumerID string     `json:"consumer_id"`
+	KeyPrefix  string     `json:"key_prefix"`
+	Label      string     `json:"label"`
+	Scopes     []string   `json:"scopes"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+// IssuedAPIKeyResponse returns the plaintext secret ONCE at issuance time.
+type IssuedAPIKeyResponse struct {
+	APIKeyMetadata
+	APIKey string `json:"api_key"`
+}
+
+type issueAPIKeyRequest struct {
+	Label     string     `json:"label"`
+	Scopes    []string   `json:"scopes"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+func (h *ConsumerHandler) handleListConsumerKeys(w http.ResponseWriter, r *http.Request) {
+	orgCtx, _ := OrgContextFromContext(r.Context())
+	consumerID := chi.URLParam(r, "consumerId")
+	if !uuidPattern.MatchString(consumerID) {
+		WriteProblem(w, r, http.StatusBadRequest, "invalid_consumer_id", "Invalid Consumer ID", "Consumer ID must be a valid UUID.")
+		return
+	}
+	rows, err := h.Store.Pool().Query(r.Context(), `
+		SELECT id, consumer_id, key_prefix, label, scopes, expires_at, revoked_at, created_at
+		FROM api_keys
+		WHERE org_id = $1 AND consumer_id = $2
+		ORDER BY created_at DESC
+	`, orgCtx.OrgID, consumerID)
+	if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not list API keys.")
+		return
+	}
+	defer rows.Close()
+
+	items := make([]APIKeyMetadata, 0)
+	for rows.Next() {
+		var m APIKeyMetadata
+		if err := rows.Scan(&m.ID, &m.ConsumerID, &m.KeyPrefix, &m.Label, &m.Scopes, &m.ExpiresAt, &m.RevokedAt, &m.CreatedAt); err != nil {
+			WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not read API key metadata.")
+			return
+		}
+		items = append(items, m)
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{"items": items, "total": len(items)})
+}
+
+func (h *ConsumerHandler) handleIssueAPIKey(w http.ResponseWriter, r *http.Request) {
+	orgCtx, _ := OrgContextFromContext(r.Context())
+	principal, _ := PrincipalFromContext(r.Context())
+	consumerID := chi.URLParam(r, "consumerId")
+	if !uuidPattern.MatchString(consumerID) {
+		WriteProblem(w, r, http.StatusBadRequest, "invalid_consumer_id", "Invalid Consumer ID", "Consumer ID must be a valid UUID.")
+		return
+	}
+
+	var in issueAPIKeyRequest
+	if r.Body != nil && r.ContentLength != 0 {
+		if !DecodeStrictJSON(w, r, 32<<10, &in) {
+			return
+		}
+	}
+	scopes := sanitizeScopes(in.Scopes)
+	label := strings.TrimSpace(in.Label)
+
+	issued, err := apikey.Generate(h.KeySecret)
+	if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Key Generation Failed", "Could not generate cryptographic API key.")
+		return
+	}
+
+	var meta APIKeyMetadata
+	err = h.Store.Pool().QueryRow(r.Context(), `
+		INSERT INTO api_keys (org_id, consumer_id, key_prefix, key_hash, label, scopes, expires_at, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING id, consumer_id, key_prefix, label, scopes, expires_at, revoked_at, created_at
+	`, orgCtx.OrgID, consumerID, issued.Prefix, issued.Hash, label, scopes, in.ExpiresAt, principal.UserID).Scan(
+		&meta.ID, &meta.ConsumerID, &meta.KeyPrefix, &meta.Label, &meta.Scopes, &meta.ExpiresAt, &meta.RevokedAt, &meta.CreatedAt,
+	)
+	if err != nil {
+		WriteProblem(w, r, http.StatusNotFound, "not_found", "Not Found", "Consumer not found in this organization.")
+		return
+	}
+	_ = bumpDraftRevision(r.Context(), h.Store, orgCtx.OrgID, principal.UserID)
+	if h.OnKeyChanged != nil {
+		h.OnKeyChanged(r, orgCtx.OrgID)
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	WriteJSON(w, http.StatusCreated, IssuedAPIKeyResponse{
+		APIKeyMetadata: meta,
+		APIKey:         issued.Plaintext,
+	})
+}
+
+func sanitizeScopes(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		trimmed := strings.TrimSpace(s)
+		if trimmed == "" || len(trimmed) > 64 {
+			continue
+		}
+		if _, dup := seen[trimmed]; !dup {
+			seen[trimmed] = struct{}{}
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
