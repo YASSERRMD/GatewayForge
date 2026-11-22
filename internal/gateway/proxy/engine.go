@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"strings"
 
+	gwauth "github.com/YASSERRMD/GatewayForge/internal/gateway/auth"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/balancer"
+	gwcors "github.com/YASSERRMD/GatewayForge/internal/gateway/cors"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
 )
 
@@ -20,6 +22,7 @@ type Engine struct {
 	TrustedProxies TrustedProxyConfig
 	Limits         ResourceLimits
 	Selector       balancer.Selector
+	Auth           *gwauth.Enforcer
 }
 
 // NewEngine creates a streaming reverse-proxy Engine backed by holder.
@@ -44,6 +47,19 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r, corr := AttachCorrelation(w, r)
 
 	tbl := e.Holder.Current()
+
+	// Evaluate browser CORS preflight before auth on routes with a CORS policy.
+	if gwcors.IsPreflight(r) {
+		reqMethod := strings.ToUpper(strings.TrimSpace(r.Header.Get("Access-Control-Request-Method")))
+		preMatch := tbl.Matcher.Match(r.Host, reqMethod, r.URL.Path)
+		if preMatch.Matched {
+			if corsCfg, hasCORS := gwcors.ResolveEffective(preMatch.Route.Policies); hasCORS {
+				gwcors.HandlePreflight(w, r, corsCfg)
+				return
+			}
+		}
+	}
+
 	match := tbl.Matcher.Match(r.Host, r.Method, r.URL.Path)
 	if !match.Matched {
 		if match.MethodMismatch {
@@ -54,6 +70,22 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		WriteGatewayError(w, r, http.StatusNotFound, CodeRouteNotFound, "no configured route matches this request")
+		return
+	}
+
+	// Apply CORS response headers for matched routes (including error responses).
+	if corsCfg, hasCORS := gwcors.ResolveEffective(match.Route.Policies); hasCORS {
+		gwcors.ApplyResponseHeaders(w, r, corsCfg)
+	}
+
+	// Enforce route/service/org consumer authentication & scopes before proxying.
+	_, stripHeaders, authErr := e.Auth.Enforce(r, tbl, match.Route)
+	if authErr != nil {
+		if errors.Is(authErr, gwauth.ErrForbidden) {
+			WriteGatewayError(w, r, http.StatusForbidden, CodeForbidden, "insufficient scope for this route")
+			return
+		}
+		WriteGatewayError(w, r, http.StatusUnauthorized, CodeUnauthorized, "authentication required")
 		return
 	}
 
@@ -91,10 +123,10 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cancel()
 
-	e.proxyStreaming(w, limitedReq, upstreamURL, corr)
+	e.proxyStreaming(w, limitedReq, upstreamURL, corr, stripHeaders)
 }
 
-func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL, corr Correlation) {
+func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL, corr Correlation, stripHeaders []string) {
 	rp := &httputil.ReverseProxy{
 		Transport:     e.Transport,
 		FlushInterval: -1, // stream response chunks immediately without buffering
@@ -106,6 +138,9 @@ func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstream
 			pr.Out.URL.RawQuery = upstreamURL.RawQuery
 			pr.Out.Host = upstreamURL.Host
 			SanitizeOutboundHeaders(pr.In, pr.Out, e.TrustedProxies)
+			for _, hdr := range stripHeaders {
+				pr.Out.Header.Del(hdr)
+			}
 			ApplyCorrelationOutbound(pr.Out, corr)
 		},
 		ModifyResponse: func(resp *http.Response) error {

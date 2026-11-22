@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -21,10 +21,11 @@ import (
 	"github.com/YASSERRMD/GatewayForge/internal/shared/db"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/events"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/netsec"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/redact"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := redact.NewJSONLogger(os.Stdout, nil)
 
 	appCfg, err := config.LoadControlPlane(os.LookupEnv)
 	if err != nil {
@@ -75,6 +76,18 @@ func main() {
 		svcH := &api.ServiceHandler{Store: st, Sessions: sessionMgr, Audit: auditRec}
 		upH := &api.UpstreamHandler{Store: st, Sessions: sessionMgr, Audit: auditRec, TargetPolicy: targetPol}
 		rtH := &api.RouteHandler{Store: st, Sessions: sessionMgr, Audit: auditRec}
+		consH := &api.ConsumerHandler{
+			Store:    st,
+			Sessions: sessionMgr,
+			Audit:    auditRec,
+			OnKeyChanged: func(req *http.Request, orgID string) {
+				_ = eventPub.PublishHint(req.Context(), events.ConfigChangeHint{
+					OrgID:       orgID,
+					PublishedAt: time.Now().UTC(),
+				})
+			},
+		}
+		polH := &api.PolicyHandler{Store: st, Sessions: sessionMgr, Audit: auditRec}
 		pubH := &api.PublicationHandler{
 			Store:        st,
 			Sessions:     sessionMgr,
@@ -104,6 +117,8 @@ func main() {
 			svcH.MountServiceRoutes(v1)
 			upH.MountUpstreamRoutes(v1)
 			rtH.MountRouteRoutes(v1)
+			consH.MountConsumerRoutes(v1)
+			polH.MountPolicyRoutes(v1)
 			pubH.MountPublicationRoutes(v1)
 			syncH.MountGatewaySyncRoutes(v1)
 		}
