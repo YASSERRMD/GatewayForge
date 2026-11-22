@@ -125,6 +125,11 @@ func main() {
 			Correlations:       corrStore,
 			TraceViewerBaseURL: os.Getenv("TRACE_VIEWER_BASE_URL"),
 		}
+		consoleH := &api.ConsoleHandler{
+			Sessions:       sessionMgr,
+			Audit:          auditRec,
+			GatewayBaseURL: os.Getenv("GATEWAY_PROXY_URL"),
+		}
 
 		srvCfg.MountV1 = func(v1 chi.Router) {
 			authH.MountAuthRoutes(v1)
@@ -139,6 +144,7 @@ func main() {
 			pubH.MountPublicationRoutes(v1)
 			syncH.MountGatewaySyncRoutes(v1)
 			telH.MountTelemetryRoutes(v1)
+			consoleH.MountConsoleRoutes(v1)
 		}
 
 		srv := control.NewServer(srvCfg)
