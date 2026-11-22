@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -14,6 +16,8 @@ import (
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/ratelimit"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/resilience"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/policy"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/snapshot"
 )
 
 // Engine executes reverse-proxy requests against the active immutable routing table.
@@ -152,12 +156,65 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cancel()
 
-	e.proxyStreaming(w, limitedReq, upstreamURL, corr, stripHeaders, pool.ID, target.ID)
+	e.proxyStreaming(w, limitedReq, upstreamURL, corr, stripHeaders, pool.ID, target.ID, match.Route.Policies)
 }
 
-func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL, corr Correlation, stripHeaders []string, poolID, targetID string) {
+type retryRoundTripper struct {
+	base      http.RoundTripper
+	pol       policy.RetryPolicy
+	bodyBytes []byte
+}
+
+func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	var lastResp *http.Response
+	var lastErr error
+	for attempt := 1; attempt <= rt.pol.MaxAttempts; attempt++ {
+		outReq := req.Clone(req.Context())
+		if len(rt.bodyBytes) > 0 {
+			outReq.Body = io.NopCloser(bytes.NewReader(rt.bodyBytes))
+			outReq.ContentLength = int64(len(rt.bodyBytes))
+		}
+		resp, err := rt.base.RoundTrip(outReq)
+		if err == nil && !resilience.IsRetryableOutcome(resp.StatusCode, nil, rt.pol) {
+			return resp, nil
+		}
+		if err != nil && !resilience.IsRetryableOutcome(0, err, rt.pol) {
+			return nil, err
+		}
+		if attempt == rt.pol.MaxAttempts {
+			return resp, err
+		}
+		// Drain and close failed response body before retrying so connections can be reused cleanly.
+		if resp != nil && resp.Body != nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
+		}
+		lastResp, lastErr = resp, err
+		delay := resilience.BackoffDelay(attempt, rt.pol, nil)
+		if !resilience.SleepWithBudget(req.Context(), delay, nil) {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, req.Context().Err()
+		}
+	}
+	return lastResp, lastErr
+}
+
+func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL, corr Correlation, stripHeaders []string, poolID, targetID string, policies []snapshot.AttachedPolicy) {
+	transport := e.Transport
+	if retryPol, hasRetry := resilience.ResolveRetryPolicy(policies); hasRetry && resilience.CanRetryMethod(r.Method, retryPol) {
+		if bodyBytes, replayable, err := resilience.PrepareReplayBody(r, retryPol.MaxReplayBodyBytes); err == nil && replayable {
+			transport = &retryRoundTripper{
+				base:      e.Transport,
+				pol:       retryPol,
+				bodyBytes: bodyBytes,
+			}
+		}
+	}
+
 	rp := &httputil.ReverseProxy{
-		Transport:     e.Transport,
+		Transport:     transport,
 		FlushInterval: -1, // stream response chunks immediately without buffering
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = upstreamURL.Scheme
