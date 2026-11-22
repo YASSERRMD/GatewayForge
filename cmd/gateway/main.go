@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/YASSERRMD/GatewayForge/internal/gateway"
+	"github.com/YASSERRMD/GatewayForge/internal/gateway/proxy"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/ratelimit"
 	syncer "github.com/YASSERRMD/GatewayForge/internal/gateway/sync"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/buildinfo"
@@ -15,6 +16,7 @@ import (
 	"github.com/YASSERRMD/GatewayForge/internal/shared/config"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/events"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/redact"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/telemetry"
 )
 
 func main() {
@@ -29,11 +31,31 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	traceProv, traceErr := telemetry.InitTracing(ctx, telemetry.TracingConfig{
+		ServiceName:    "gatewayforge-gateway",
+		ServiceVersion: buildinfo.ForService("gateway").Version,
+		Environment:    string(appCfg.Env),
+		OTLPEndpoint:   os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+	})
+	if traceErr != nil {
+		logger.Warn("otel tracing init failed; continuing with no-op tracer", "error", traceErr)
+	} else {
+		defer func() {
+			shCtx, shCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer shCancel()
+			_ = traceProv.Shutdown(shCtx)
+		}()
+	}
+
 	srvCfg := gateway.DefaultServerConfig()
 	srvCfg.Addr = appCfg.Addr
 	srvCfg.ShutdownTimeout = appCfg.ShutdownTimeout
 	srvCfg.AllowMockUpstreams = appCfg.AllowMockUpstreams
 	srv := gateway.NewServer(srvCfg)
+	srv.Engine().Logger = logger
+	if traceProv != nil {
+		srv.Engine().Tracer = traceProv.Tracer()
+	}
 
 	var hints *events.HintCoalescer
 	if appCfg.RedisAddr != "" {
@@ -56,6 +78,87 @@ func main() {
 				ratelimit.NewRedisQuotaCounter(rc, 250*time.Millisecond),
 				nil,
 			))
+
+			// Publish periodic gateway instance heartbeat for control-plane convergence monitoring.
+			hbStore := telemetry.NewHeartbeatStore(rc, "")
+			aggStore := telemetry.NewAggregateStore(rc, "", telemetry.DefaultRetention)
+			corrStore := telemetry.NewCorrelationStore(rc, "", telemetry.DefaultCorrelationTTL)
+			sampleCh := make(chan proxy.RequestOutcome, 2048)
+			go func() {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case out := <-sampleCh:
+						durMS := float64(out.Duration.Microseconds()) / 1000.0
+						_ = aggStore.Record(ctx, telemetry.TrafficSample{
+							Timestamp:  out.Timestamp,
+							OrgID:      out.OrgID,
+							RouteID:    out.RouteID,
+							ServiceID:  out.ServiceID,
+							Status:     out.Status,
+							Outcome:    out.Outcome,
+							DurationMS: durMS,
+						})
+						if out.RequestID != "" && out.TraceID != "" {
+							_ = corrStore.Record(ctx, telemetry.RequestCorrelation{
+								RequestID:  out.RequestID,
+								TraceID:    out.TraceID,
+								OrgID:      out.OrgID,
+								RouteID:    out.RouteID,
+								ServiceID:  out.ServiceID,
+								Method:     out.Method,
+								Status:     out.Status,
+								Outcome:    out.Outcome,
+								DurationMS: durMS,
+								Timestamp:  out.Timestamp,
+							})
+						}
+					}
+				}
+			}()
+			srv.SetOutcomeHook(func(out proxy.RequestOutcome) {
+				if out.OrgID == "" {
+					return
+				}
+				select {
+				case sampleCh <- out:
+				default:
+					// Drop silently under extreme saturation rather than blocking the proxy hot path.
+				}
+			})
+			instanceID := os.Getenv("GATEWAY_INSTANCE_ID")
+			if instanceID == "" {
+				instanceID, _ = os.Hostname()
+			}
+			if instanceID == "" {
+				instanceID = "gateway-local"
+			}
+			buildVer := buildinfo.ForService("gateway").Version
+			go func() {
+				ticker := time.NewTicker(telemetry.DefaultHBInterval)
+				defer ticker.Stop()
+				emit := func() {
+					cur := srv.TableHolder().Current()
+					_ = hbStore.Publish(ctx, telemetry.GatewayHeartbeat{
+						InstanceID:    instanceID,
+						OrgID:         cur.OrgID,
+						ActiveVersion: cur.Version,
+						Checksum:      cur.Checksum,
+						Ready:         cur.Version > 0,
+						BuildVersion:  buildVer,
+					})
+				}
+				emit()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						emit()
+					}
+				}
+			}()
 		}
 	} else {
 		srv.AttachRateLimiter(ratelimit.NewEnforcer(

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	gwauth "github.com/YASSERRMD/GatewayForge/internal/gateway/auth"
+	gwmetrics "github.com/YASSERRMD/GatewayForge/internal/gateway/metrics"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/proxy"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/ratelimit"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/resilience"
@@ -64,8 +65,12 @@ type Server struct {
 	transport     *http.Transport
 	engine        *proxy.Engine
 	rlMetrics     *ratelimit.Telemetry
+	promMetrics   *gwmetrics.Registry
 	healthTracker *resilience.HealthTracker
 	mux           *http.ServeMux
+
+	outcomeMu sync.RWMutex
+	onOutcome func(proxy.RequestOutcome)
 
 	statusMu sync.RWMutex
 	statusFn func() syncer.SyncStatus
@@ -116,6 +121,7 @@ func NewServer(cfg ServerConfig) *Server {
 		IdleTimeout:       cfg.IdleTimeout,
 	}
 
+	promReg := gwmetrics.NewRegistry(gwmetrics.DefaultMaxTrackedRoutes, gwmetrics.DefaultMaxTrackedServices)
 	s := &Server{
 		cfg:           cfg,
 		httpServer:    srv,
@@ -124,13 +130,28 @@ func NewServer(cfg ServerConfig) *Server {
 		transport:     tr,
 		engine:        eng,
 		rlMetrics:     ratelimit.NewTelemetry(ratelimit.DefaultMaxMetricRoutes),
+		promMetrics:   promReg,
 		healthTracker: ht,
 		mux:           mux,
+	}
+	eng.OnOutcome = func(out proxy.RequestOutcome) {
+		promReg.ObserveRequest(out.RouteID, out.ServiceID, out.Method, out.Status, out.Outcome, out.Duration)
+		s.outcomeMu.RLock()
+		cb := s.onOutcome
+		s.outcomeMu.RUnlock()
+		if cb != nil {
+			cb(out)
+		}
 	}
 	mux.HandleFunc("/health/config", s.handleConfigStatus)
 	mux.HandleFunc("/health/ratelimit", s.handleRateLimitStatus)
 	mux.HandleFunc("/health/upstreams", s.handleUpstreamHealth)
-	mux.Handle("/", eng)
+	mux.HandleFunc("/metrics", s.handlePrometheusMetrics)
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		promReg.IncInFlight()
+		defer promReg.DecInFlight()
+		eng.ServeHTTP(w, r)
+	}))
 	return s
 }
 
@@ -171,6 +192,32 @@ func (s *Server) handleRateLimitStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(s.rlMetrics.Snapshot())
+}
+
+// Metrics returns the bounded-cardinality Prometheus metrics registry.
+func (s *Server) Metrics() *gwmetrics.Registry {
+	return s.promMetrics
+}
+
+// SetOutcomeHook registers an additional hook invoked after every gateway request completes.
+func (s *Server) SetOutcomeHook(fn func(proxy.RequestOutcome)) {
+	s.outcomeMu.Lock()
+	defer s.outcomeMu.Unlock()
+	s.onOutcome = fn
+}
+
+func (s *Server) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if tbl := s.holder.Current(); tbl != nil {
+		s.promMetrics.SetActiveConfigVersion(tbl.Version)
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(s.promMetrics.FormatPrometheus(s.rlMetrics.FormatPrometheus())))
 }
 
 func (s *Server) handleUpstreamHealth(w http.ResponseWriter, r *http.Request) {

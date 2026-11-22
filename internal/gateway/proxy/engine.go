@@ -5,10 +5,18 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	gwauth "github.com/YASSERRMD/GatewayForge/internal/gateway/auth"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/balancer"
@@ -16,9 +24,50 @@ import (
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/ratelimit"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/resilience"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/logging"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/policy"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/snapshot"
 )
+
+// RequestOutcome summarizes one completed gateway request for structured logging, metrics, and aggregation.
+type RequestOutcome struct {
+	Timestamp  time.Time
+	OrgID      string
+	RouteID    string
+	ServiceID  string
+	PathPrefix string
+	Method     string
+	Status     int
+	Outcome    string
+	Duration   time.Duration
+	RequestID  string
+	TraceID    string
+}
+
+type statusCaptureWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusCaptureWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusCaptureWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *statusCaptureWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
 
 // Engine executes reverse-proxy requests against the active immutable routing table.
 type Engine struct {
@@ -33,6 +82,9 @@ type Engine struct {
 	Health         *resilience.HealthTracker
 	CircuitBreaker *resilience.CircuitBreakerRegistry
 	Bulkhead       *resilience.BulkheadRegistry
+	Logger         *slog.Logger
+	Tracer         trace.Tracer
+	OnOutcome      func(RequestOutcome)
 }
 
 // NewEngine creates a streaming reverse-proxy Engine backed by holder.
@@ -56,9 +108,86 @@ func NewEngine(holder *table.Holder, transport http.RoundTripper, pol Destinatio
 
 // ServeHTTP matches the request against the immutable snapshot and streams it to the selected upstream.
 func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	cw := &statusCaptureWriter{ResponseWriter: w}
+	w = cw
+
+	tracer := e.Tracer
+	if tracer == nil {
+		tracer = otel.Tracer("gatewayforge-gateway")
+	}
+	extractedCtx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+	spanCtx, rootSpan := tracer.Start(extractedCtx, "gateway.inbound",
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(attribute.String("http.request.method", r.Method)),
+	)
+	r = r.WithContext(spanCtx)
+
 	r, corr := AttachCorrelation(w, r)
+	if sc := rootSpan.SpanContext(); sc.IsValid() {
+		corr.TraceID = sc.TraceID().String()
+		corr.Traceparent = "00-" + sc.TraceID().String() + "-" + sc.SpanID().String() + "-01"
+		w.Header().Set("traceparent", corr.Traceparent)
+	}
+	rootSpan.SetAttributes(attribute.String("gateway.request_id", corr.RequestID))
 
 	tbl := e.Holder.Current()
+	var matchedRoute snapshot.Route
+	var matched bool
+	defer func() {
+		status := cw.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		dur := time.Since(start)
+		routeID, serviceID, prefix := "", "", ""
+		if matched {
+			routeID = matchedRoute.ID
+			serviceID = matchedRoute.ServiceID
+			prefix = matchedRoute.PathPrefix
+		}
+		rootSpan.SetAttributes(
+			attribute.String("gateway.org_id", tbl.OrgID),
+			attribute.String("gateway.route_id", routeID),
+			attribute.String("gateway.service_id", serviceID),
+			attribute.Int("http.response.status_code", status),
+		)
+		if status >= 500 {
+			rootSpan.SetStatus(codes.Error, http.StatusText(status))
+		}
+		rootSpan.End()
+		outcome := logging.ClassifyOutcome(status)
+		if e.Logger != nil {
+			logging.LogAccess(e.Logger, logging.AccessRecord{
+				Timestamp:  start.UTC(),
+				RequestID:  corr.RequestID,
+				TraceID:    corr.TraceID,
+				OrgID:      tbl.OrgID,
+				RouteID:    routeID,
+				ServiceID:  serviceID,
+				Method:     r.Method,
+				PathPrefix: prefix,
+				Status:     status,
+				Outcome:    outcome,
+				DurationMS: float64(dur.Microseconds()) / 1000.0,
+			})
+		}
+		if e.OnOutcome != nil {
+			e.OnOutcome(RequestOutcome{
+				Timestamp:  start.UTC(),
+				OrgID:      tbl.OrgID,
+				RouteID:    routeID,
+				ServiceID:  serviceID,
+				PathPrefix: prefix,
+				Method:     r.Method,
+				Status:     status,
+				Outcome:    outcome,
+				Duration:   dur,
+				RequestID:  corr.RequestID,
+				TraceID:    corr.TraceID,
+			})
+		}
+	}()
 
 	// Evaluate browser CORS preflight before auth on routes with a CORS policy.
 	if gwcors.IsPreflight(r) {
@@ -66,6 +195,8 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		preMatch := tbl.Matcher.Match(r.Host, reqMethod, r.URL.Path)
 		if preMatch.Matched {
 			if corsCfg, hasCORS := gwcors.ResolveEffective(preMatch.Route.Policies); hasCORS {
+				matchedRoute = preMatch.Route
+				matched = true
 				gwcors.HandlePreflight(w, r, corsCfg)
 				return
 			}
@@ -84,6 +215,8 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		WriteGatewayError(w, r, http.StatusNotFound, CodeRouteNotFound, "no configured route matches this request")
 		return
 	}
+	matchedRoute = match.Route
+	matched = true
 
 	// Apply CORS response headers for matched routes (including error responses).
 	if corsCfg, hasCORS := gwcors.ResolveEffective(match.Route.Policies); hasCORS {
@@ -91,8 +224,11 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Enforce route/service/org consumer authentication & scopes before proxying.
+	_, authSpan := tracer.Start(r.Context(), "gateway.policy.auth")
 	identity, stripHeaders, authErr := e.Auth.Enforce(r, tbl, match.Route)
 	if authErr != nil {
+		authSpan.SetStatus(codes.Error, "auth_denied")
+		authSpan.End()
 		if errors.Is(authErr, gwauth.ErrForbidden) {
 			WriteGatewayError(w, r, http.StatusForbidden, CodeForbidden, "insufficient scope for this route")
 			return
@@ -100,10 +236,14 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		WriteGatewayError(w, r, http.StatusUnauthorized, CodeUnauthorized, "authentication required")
 		return
 	}
+	authSpan.SetAttributes(attribute.String("gateway.auth_method", identity.Method))
+	authSpan.End()
 
 	// Enforce distributed rate limits and UTC quotas after auth so consumer identity is known.
 	if e.RateLimit != nil {
-		rlRes := e.RateLimit.Enforce(r.Context(), r, tbl.OrgID, match.Route, identity.ConsumerID)
+		rlCtx, rlSpan := tracer.Start(r.Context(), "gateway.policy.ratelimit")
+		rlRes := e.RateLimit.Enforce(rlCtx, r, tbl.OrgID, match.Route, identity.ConsumerID)
+		rlSpan.SetAttributes(attribute.Bool("gateway.ratelimit.allowed", rlRes.Allowed))
 		if rlRes.EmitHeaders {
 			ratelimit.WriteHeaders(w.Header(), rlRes.Decision)
 		}
@@ -111,6 +251,8 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-RateLimit-Mode", "fail-open-degraded")
 		}
 		if !rlRes.Allowed {
+			rlSpan.SetStatus(codes.Error, rlRes.DeniedBy)
+			rlSpan.End()
 			if rlRes.DeniedBy == "backend_unavailable" {
 				WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeServiceOverloaded, "rate limit backend unavailable")
 				return
@@ -118,6 +260,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			WriteGatewayError(w, r, http.StatusTooManyRequests, CodeRateLimited, "rate limit or quota exceeded")
 			return
 		}
+		rlSpan.End()
 	}
 
 	pool, ok := tbl.Pools[match.Route.UpstreamPoolID]
@@ -187,7 +330,16 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cancel()
 
-	e.proxyStreaming(w, limitedReq, upstreamURL, corr, stripHeaders, pool.ID, target.ID, match.Route.Policies, cbRecord)
+	proxyCtx, proxySpan := tracer.Start(limitedReq.Context(), "gateway.upstream.proxy",
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			attribute.String("gateway.pool_id", pool.ID),
+			attribute.String("gateway.target_id", target.ID),
+		),
+	)
+	defer proxySpan.End()
+
+	e.proxyStreaming(w, limitedReq.WithContext(proxyCtx), upstreamURL, corr, stripHeaders, pool.ID, target.ID, match.Route.Policies, cbRecord)
 }
 
 type retryRoundTripper struct {
@@ -259,6 +411,7 @@ func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstream
 				pr.Out.Header.Del(hdr)
 			}
 			ApplyCorrelationOutbound(pr.Out, corr)
+			otel.GetTextMapPropagator().Inject(pr.Out.Context(), propagation.HeaderCarrier(pr.Out.Header))
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			StripHopByHop(resp.Header)
