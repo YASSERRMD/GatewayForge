@@ -1,5 +1,5 @@
 .PHONY: help check-layout deps fmt vet lint lint-go lint-web typecheck \
-        test test-go test-race test-web build build-go build-web \
+        test test-go test-race test-web security-test build build-go build-web \
         integration compose-config compose-up compose-down db-reset migrate seed verify clean
 
 SHELL := /usr/bin/env bash
@@ -46,6 +46,11 @@ test-web: ## Run Vitest suite in apps/web
 	cd apps/web && npm run test -- --run
 
 test: test-go test-web ## Run unit test suites
+
+security-test: ## Run adversarial security, chaos, container, and secret scan checks
+	@bash scripts/check-containers.sh
+	@bash scripts/check-secrets.sh
+	go test -race -v ./tests/security/...
 
 build-go: ## Build control-plane, gateway, migrate, seed, and mock-upstream binaries into bin/
 	@mkdir -p bin

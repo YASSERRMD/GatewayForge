@@ -20,11 +20,10 @@ type TargetPolicy struct {
 
 // DefaultTargetPolicy builds the standard environment destination policy.
 func DefaultTargetPolicy(allowMocks bool) TargetPolicy {
-	mocks := map[string]struct{}{}
-	if allowMocks {
-		mocks["mock-upstream"] = struct{}{}
-		mocks["mock-upstream-1"] = struct{}{}
-		mocks["mock-upstream-2"] = struct{}{}
+	mocks := map[string]struct{}{
+		"mock-upstream":   {},
+		"mock-upstream-1": {},
+		"mock-upstream-2": {},
 	}
 	return TargetPolicy{
 		AllowMockUpstreams: allowMocks,
