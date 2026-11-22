@@ -1,0 +1,14 @@
+FROM golang:1.25.5-alpine AS builder
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/mock-upstream ./cmd/mock-upstream
+COPY internal/mockupstream ./internal/mockupstream
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/mock-upstream ./cmd/mock-upstream
+
+FROM alpine:3.21
+RUN apk add --no-cache wget ca-certificates && adduser -D -u 10001 appuser
+COPY --from=builder /out/mock-upstream /usr/local/bin/mock-upstream
+USER appuser
+EXPOSE 8089
+ENTRYPOINT ["/usr/local/bin/mock-upstream"]
