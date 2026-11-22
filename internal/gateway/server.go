@@ -12,10 +12,12 @@ import (
 	"sync"
 	"time"
 
+	gwauth "github.com/YASSERRMD/GatewayForge/internal/gateway/auth"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/proxy"
 	syncer "github.com/YASSERRMD/GatewayForge/internal/gateway/sync"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/health"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/netsec"
 )
 
 // ServerConfig configures the gateway data-plane HTTP listener.
@@ -84,6 +86,13 @@ func NewServer(cfg ServerConfig) *Server {
 	pol.AllowLoopback = cfg.AllowLoopback
 	tr := proxy.NewSafeTransport(proxy.DefaultTransportConfig(), pol)
 	eng := proxy.NewEngine(holder, tr, pol)
+	jwksPol := netsec.DefaultTargetPolicy(cfg.AllowMockUpstreams)
+	jwksPol.AllowLoopback = cfg.AllowLoopback
+	jwksCache := gwauth.NewJWKSCache(tr, jwksPol, 5*time.Minute)
+	eng.Auth = &gwauth.Enforcer{
+		APIKeys: gwauth.NewAPIKeyAuthenticator(nil),
+		JWT:     gwauth.NewJWTVerifier(jwksCache),
+	}
 	if len(cfg.TrustedProxyCIDRs) > 0 {
 		if trusted, err := proxy.ParseTrustedProxies(cfg.TrustedProxyCIDRs); err == nil {
 			eng.TrustedProxies = trusted

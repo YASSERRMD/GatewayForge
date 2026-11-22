@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -13,10 +12,11 @@ import (
 	"github.com/YASSERRMD/GatewayForge/internal/shared/cache"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/config"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/events"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/redact"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := redact.NewJSONLogger(os.Stdout, nil)
 
 	appCfg, err := config.LoadGateway(os.LookupEnv)
 	if err != nil {
