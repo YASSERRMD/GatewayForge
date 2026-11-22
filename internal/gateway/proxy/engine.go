@@ -14,9 +14,10 @@ import (
 
 // Engine executes reverse-proxy requests against the active immutable routing table.
 type Engine struct {
-	Holder    *table.Holder
-	Transport http.RoundTripper
-	Policy    DestinationPolicy
+	Holder         *table.Holder
+	Transport      http.RoundTripper
+	Policy         DestinationPolicy
+	TrustedProxies TrustedProxyConfig
 }
 
 // NewEngine creates a streaming reverse-proxy Engine backed by holder.
@@ -121,6 +122,11 @@ func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstream
 			pr.Out.URL.RawPath = ""
 			pr.Out.URL.RawQuery = upstreamURL.RawQuery
 			pr.Out.Host = upstreamURL.Host
+			SanitizeOutboundHeaders(pr.In, pr.Out, e.TrustedProxies)
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			StripHopByHop(resp.Header)
+			return nil
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
 			status := http.StatusBadGateway
