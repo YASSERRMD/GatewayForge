@@ -12,4 +12,5 @@
 | 01 — Foundation | `phase/01-foundation` | 2026-11-22 06:59 | 2026-11-22 07:17 | 12 (11 planned + 1 CI version pin) | https://github.com/YASSERRMD/GatewayForge/pull/1 | `3ba739613f4ece7794755623792503337e2d2b30` | Merged |
 | 02 — Database | `phase/02-data-model` | 2026-11-22 07:18 | 2026-11-22 07:29 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/2 | `d53b2b98231bad591e85970cc52f5d628d55d9bf` | Merged |
 | 03 — Control-plane auth | `phase/03-control-api-auth` | 2026-11-22 07:30 | 2026-11-22 07:46 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/3 | `c61870891a228829117ba2e8d8abd673dbbdb606` | Merged |
-| 04 — Proxy data plane | `phase/04-proxy-engine` | 2026-11-22 07:47 | TBD | In progress | TBD | TBD | In progress |
+| 04 — Proxy data plane | `phase/04-proxy-engine` | 2026-11-22 07:47 | 2026-11-22 08:00 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/4 | `c3521851351619ada4c87aa2e10910b2867438de` | Merged |
+| 05 — Dynamic config | `phase/05-dynamic-config` | 2026-11-22 08:01 | TBD | In progress | TBD | TBD | In progress |
