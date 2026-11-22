@@ -31,6 +31,7 @@ type Engine struct {
 	Auth           *gwauth.Enforcer
 	RateLimit      *ratelimit.Enforcer
 	Health         *resilience.HealthTracker
+	CircuitBreaker *resilience.CircuitBreakerRegistry
 }
 
 // NewEngine creates a streaming reverse-proxy Engine backed by holder.
@@ -42,11 +43,12 @@ func NewEngine(holder *table.Holder, transport http.RoundTripper, pol Destinatio
 		transport = http.DefaultTransport
 	}
 	return &Engine{
-		Holder:    holder,
-		Transport: transport,
-		Policy:    pol,
-		Limits:    DefaultResourceLimits(),
-		Selector:  balancer.NewWeightedRoundRobin(),
+		Holder:         holder,
+		Transport:      transport,
+		Policy:         pol,
+		Limits:         DefaultResourceLimits(),
+		Selector:       balancer.NewWeightedRoundRobin(),
+		CircuitBreaker: resilience.NewCircuitBreakerRegistry(nil),
 	}
 }
 
@@ -122,6 +124,20 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Evaluate per-pool/route circuit breaker before forwarding.
+	cbRecord := func(int, error) {}
+	if cbPol, hasCB := resilience.ResolveCircuitBreakerPolicy(match.Route.Policies); hasCB && e.CircuitBreaker != nil {
+		cbKey := tbl.OrgID + "|" + pool.ID
+		recFn, allowed := e.CircuitBreaker.Allow(cbKey, cbPol)
+		if !allowed {
+			WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "upstream circuit breaker is open")
+			return
+		}
+		cbRecord = recFn
+		// Release half-open slot cleanly if request aborts locally before reaching upstream.
+		defer cbRecord(http.StatusOK, nil)
+	}
+
 	sel := e.Selector
 	if sel == nil {
 		sel = balancer.NewWeightedRoundRobin()
@@ -156,7 +172,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cancel()
 
-	e.proxyStreaming(w, limitedReq, upstreamURL, corr, stripHeaders, pool.ID, target.ID, match.Route.Policies)
+	e.proxyStreaming(w, limitedReq, upstreamURL, corr, stripHeaders, pool.ID, target.ID, match.Route.Policies, cbRecord)
 }
 
 type retryRoundTripper struct {
@@ -201,7 +217,7 @@ func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	return lastResp, lastErr
 }
 
-func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL, corr Correlation, stripHeaders []string, poolID, targetID string, policies []snapshot.AttachedPolicy) {
+func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL, corr Correlation, stripHeaders []string, poolID, targetID string, policies []snapshot.AttachedPolicy, cbRecord func(int, error)) {
 	transport := e.Transport
 	if retryPol, hasRetry := resilience.ResolveRetryPolicy(policies); hasRetry && resilience.CanRetryMethod(r.Method, retryPol) {
 		if bodyBytes, replayable, err := resilience.PrepareReplayBody(r, retryPol.MaxReplayBodyBytes); err == nil && replayable {
@@ -234,11 +250,17 @@ func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstream
 			if e.Health != nil {
 				e.Health.RecordPassiveOutcome(poolID, targetID, resp.StatusCode, nil, resilience.DefaultPassiveConfig())
 			}
+			if cbRecord != nil {
+				cbRecord(resp.StatusCode, nil)
+			}
 			return nil
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
 			if e.Health != nil {
 				e.Health.RecordPassiveOutcome(poolID, targetID, 0, proxyErr, resilience.DefaultPassiveConfig())
+			}
+			if cbRecord != nil {
+				cbRecord(0, proxyErr)
 			}
 			var maxBytesErr *http.MaxBytesError
 			switch {
