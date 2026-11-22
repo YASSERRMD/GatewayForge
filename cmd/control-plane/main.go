@@ -130,6 +130,11 @@ func main() {
 			Audit:          auditRec,
 			GatewayBaseURL: os.Getenv("GATEWAY_PROXY_URL"),
 		}
+		openAPIH := &api.OpenAPIHandler{
+			Store:    st,
+			Sessions: sessionMgr,
+			Audit:    auditRec,
+		}
 
 		srvCfg.MountV1 = func(v1 chi.Router) {
 			authH.MountAuthRoutes(v1)
@@ -145,6 +150,7 @@ func main() {
 			syncH.MountGatewaySyncRoutes(v1)
 			telH.MountTelemetryRoutes(v1)
 			consoleH.MountConsoleRoutes(v1)
+			openAPIH.MountOpenAPIRoutes(v1)
 		}
 
 		srv := control.NewServer(srvCfg)
