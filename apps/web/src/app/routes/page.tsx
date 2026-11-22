@@ -1,10 +1,10 @@
 import { AppShell } from "@/components/app-shell";
-import { RoutesView } from "@/components/management/routes-view";
+import { RoutesManager } from "@/components/management/routes-manager";
 
 export default function RoutesPage() {
   return (
     <AppShell>
-      <RoutesView />
+      <RoutesManager />
     </AppShell>
   );
 }
