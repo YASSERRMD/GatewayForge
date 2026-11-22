@@ -12,6 +12,7 @@ import (
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/balancer"
 	gwcors "github.com/YASSERRMD/GatewayForge/internal/gateway/cors"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/ratelimit"
+	"github.com/YASSERRMD/GatewayForge/internal/gateway/resilience"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
 )
 
@@ -25,6 +26,7 @@ type Engine struct {
 	Selector       balancer.Selector
 	Auth           *gwauth.Enforcer
 	RateLimit      *ratelimit.Enforcer
+	Health         *resilience.HealthTracker
 }
 
 // NewEngine creates a streaming reverse-proxy Engine backed by holder.
@@ -120,9 +122,15 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if sel == nil {
 		sel = balancer.NewWeightedRoundRobin()
 	}
-	target, err := sel.Pick(pool, nil)
+	var healthFilter func(string) bool
+	if e.Health != nil {
+		healthFilter = func(targetID string) bool {
+			return e.Health.IsHealthy(pool.ID, targetID)
+		}
+	}
+	target, err := sel.Pick(pool, healthFilter)
 	if err != nil {
-		WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "no enabled targets available in upstream pool")
+		WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "no healthy enabled targets available in upstream pool")
 		return
 	}
 
@@ -144,10 +152,10 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cancel()
 
-	e.proxyStreaming(w, limitedReq, upstreamURL, corr, stripHeaders)
+	e.proxyStreaming(w, limitedReq, upstreamURL, corr, stripHeaders, pool.ID, target.ID)
 }
 
-func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL, corr Correlation, stripHeaders []string) {
+func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL, corr Correlation, stripHeaders []string, poolID, targetID string) {
 	rp := &httputil.ReverseProxy{
 		Transport:     e.Transport,
 		FlushInterval: -1, // stream response chunks immediately without buffering
@@ -166,9 +174,15 @@ func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstream
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			StripHopByHop(resp.Header)
+			if e.Health != nil {
+				e.Health.RecordPassiveOutcome(poolID, targetID, resp.StatusCode, nil, resilience.DefaultPassiveConfig())
+			}
 			return nil
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
+			if e.Health != nil {
+				e.Health.RecordPassiveOutcome(poolID, targetID, 0, proxyErr, resilience.DefaultPassiveConfig())
+			}
 			var maxBytesErr *http.MaxBytesError
 			switch {
 			case errors.As(proxyErr, &maxBytesErr):
