@@ -100,7 +100,6 @@ export function ServicesManager() {
             slug: slug.trim(),
             name: name.trim(),
             description: description.trim(),
-            enabled,
           },
           onUnauthorized: () => clearSession(true),
         });
