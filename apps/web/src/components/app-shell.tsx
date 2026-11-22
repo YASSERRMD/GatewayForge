@@ -21,6 +21,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/states";
+import { OrgSwitcher } from "@/components/org-switcher";
 import { useAuth } from "@/lib/auth-context";
 import { cn } from "@/lib/utils";
 
@@ -44,7 +45,7 @@ export function AppShell({
   children: React.ReactNode;
   topbarSlot?: React.ReactNode;
 }) {
-  const { status, user, activeOrg, logout } = useAuth();
+  const { status, user, activeOrgId, cacheVersion, logout } = useAuth();
   const pathname = usePathname();
   const router = useRouter();
   const [mobileOpen, setMobileOpen] = React.useState(false);
@@ -172,14 +173,7 @@ export function AppShell({
             >
               <Menu className="h-5 w-5" aria-hidden="true" />
             </button>
-            {topbarSlot ?? (
-              <div className="flex items-center gap-2 text-sm">
-                <span className="font-medium text-[var(--foreground)]">
-                  {activeOrg?.org_name ?? "No organization"}
-                </span>
-                {activeOrg && <Badge variant="default">{activeOrg.role}</Badge>}
-              </div>
-            )}
+            {topbarSlot ?? <OrgSwitcher />}
           </div>
 
           <div className="flex items-center gap-2">
@@ -197,7 +191,11 @@ export function AppShell({
           </div>
         </header>
 
-        <main id="main-content" className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 lg:px-6">
+        <main
+          id="main-content"
+          key={`${activeOrgId ?? "none"}:${cacheVersion}`}
+          className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 lg:px-6"
+        >
           {children}
         </main>
       </div>

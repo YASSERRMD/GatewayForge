@@ -42,7 +42,7 @@ describe("AppShell", () => {
       </AuthProvider>
     );
     expect(screen.getByRole("heading", { name: "Overview Content" })).toBeInTheDocument();
-    expect(screen.getByText("Acme Corp")).toBeInTheDocument();
+    expect(screen.getByLabelText("Active organization")).toHaveValue("o1");
     expect(screen.getByRole("link", { name: "Services" })).toBeInTheDocument();
 
     const menuBtn = screen.getByRole("button", { name: /open navigation menu/i });
