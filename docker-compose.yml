@@ -21,6 +21,26 @@ services:
     networks:
       - gatewayforge-internal
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:-gatewayforge_local_redis_pw}
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6389}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-gatewayforge_local_redis_pw} ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    networks:
+      - gatewayforge-internal
+
 volumes:
   gatewayforge_pgdata:
 
