@@ -1,10 +1,10 @@
 import { AppShell } from "@/components/app-shell";
-import { ServicesView } from "@/components/management/services-view";
+import { ServicesManager } from "@/components/management/services-manager";
 
 export default function ServicesPage() {
   return (
     <AppShell>
-      <ServicesView />
+      <ServicesManager />
     </AppShell>
   );
 }
