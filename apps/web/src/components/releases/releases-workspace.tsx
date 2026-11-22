@@ -7,6 +7,7 @@ import { Input, Label } from "@/components/ui/input";
 import { ErrorBanner } from "@/components/ui/states";
 import { ConfigDiffViewer } from "@/components/releases/config-diff-viewer";
 import { DraftPublishPanel } from "@/components/releases/draft-publish-panel";
+import { GatewayConvergencePanel } from "@/components/releases/gateway-convergence-panel";
 import {
   ReleaseHistoryTable,
   type PublicationRecord,
@@ -91,7 +92,7 @@ export function ReleasesWorkspace({ convergenceSlot }: ReleasesWorkspaceProps) {
         </p>
       </div>
 
-      {convergenceSlot}
+      {convergenceSlot ?? <GatewayConvergencePanel reloadKey={reloadKey} />}
 
       <DraftPublishPanel
         reloadKey={reloadKey}
