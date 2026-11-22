@@ -179,26 +179,27 @@ export function AppShell({
 
       {/* Main Content Area */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-3 border-b border-[var(--border)] bg-[var(--card)] px-4 lg:px-6">
-          <div className="flex items-center gap-3">
+        <header className="sticky top-0 z-30 flex h-14 items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--card)] px-3 sm:gap-3 sm:px-4 lg:px-6">
+          <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-3">
             <button
               type="button"
               aria-label="Open navigation menu"
               aria-controls="mobile-nav-drawer"
               aria-expanded={mobileOpen}
               onClick={() => setMobileOpen((v) => !v)}
-              className="rounded-md p-1.5 text-[var(--foreground)] hover:bg-[var(--muted)] lg:hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
+              className="shrink-0 rounded-md p-1.5 text-[var(--foreground)] hover:bg-[var(--muted)] lg:hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
             >
               <Menu className="h-5 w-5" aria-hidden="true" />
             </button>
             {topbarSlot ?? <OrgSwitcher />}
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             <Button
               type="button"
               variant="outline"
               size="sm"
+              className="shrink-0 whitespace-nowrap px-2.5 sm:px-3"
               onClick={() => {
                 void logout().then(() => router.replace("/login"));
               }}

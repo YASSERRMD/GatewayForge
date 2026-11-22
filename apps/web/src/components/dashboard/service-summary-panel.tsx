@@ -109,9 +109,9 @@ export function ServiceSummaryPanel({
                       key={rt.id}
                       className="flex flex-wrap items-center justify-between gap-2 px-3 py-2"
                     >
-                      <div className="flex flex-wrap items-center gap-2 font-mono">
+                      <div className="flex min-w-0 flex-wrap items-center gap-2 font-mono">
                         <Badge variant="default">{rt.methods.join(",")}</Badge>
-                        <span className="text-[var(--foreground)]">
+                        <span className="break-all text-[var(--foreground)]">
                           {rt.host}
                           {rt.path_prefix}
                         </span>
