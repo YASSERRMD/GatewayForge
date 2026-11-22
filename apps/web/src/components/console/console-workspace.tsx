@@ -5,12 +5,17 @@ import { History, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select } from "@/components/ui/input";
 import {
   appendSanitizedHistory,
   clearSanitizedHistory,
   loadSanitizedHistory,
   type SanitizedHistoryEntry,
 } from "@/components/console/console-history";
+import {
+  CONSOLE_ENVIRONMENT_PRESETS,
+  interpolatePresetVariables,
+} from "@/components/console/environment-presets";
 import {
   RequestConsole,
   type ConsoleExecuteRequest,
@@ -23,6 +28,16 @@ export interface ConsoleWorkspaceProps {
 }
 
 export function ConsoleWorkspace({ headerSlot, presetHost }: ConsoleWorkspaceProps) {
+  const [selectedPresetId, setSelectedPresetId] = React.useState(
+    CONSOLE_ENVIRONMENT_PRESETS[0]?.id ?? "local-dev"
+  );
+  const activePreset = React.useMemo(
+    () =>
+      CONSOLE_ENVIRONMENT_PRESETS.find((p) => p.id === selectedPresetId) ??
+      CONSOLE_ENVIRONMENT_PRESETS[0],
+    [selectedPresetId]
+  );
+
   const [optInHistory, setOptInHistory] = React.useState(false);
   const [history, setHistory] = React.useState<SanitizedHistoryEntry[]>([]);
   const [draft, setDraft] = React.useState<(Partial<ConsoleExecuteRequest> & { nonce?: number }) | undefined>(
@@ -36,9 +51,34 @@ export function ConsoleWorkspace({ headerSlot, presetHost }: ConsoleWorkspacePro
   const handleExecuted = React.useCallback(
     (req: ConsoleExecuteRequest, resp: ConsoleExecuteResponse) => {
       if (!optInHistory) return;
-      setHistory(appendSanitizedHistory(req, resp.status));
+      const resolvedPath = activePreset
+        ? interpolatePresetVariables(req.path, activePreset.variables)
+        : req.path;
+      setHistory(appendSanitizedHistory({ ...req, path: resolvedPath }, resp.status));
     },
-    [optInHistory]
+    [optInHistory, activePreset]
+  );
+
+  const envSwitcher = (
+    <div className="flex flex-wrap items-center gap-2">
+      <label htmlFor="console-env-preset" className="text-xs font-medium text-[var(--muted-foreground)]">
+        Environment preset
+      </label>
+      <Select
+        id="console-env-preset"
+        aria-label="Environment preset"
+        value={selectedPresetId}
+        onChange={(e) => setSelectedPresetId(e.target.value)}
+        className="w-auto min-w-[200px]"
+      >
+        {CONSOLE_ENVIRONMENT_PRESETS.map((preset) => (
+          <option key={preset.id} value={preset.id}>
+            {preset.label} ({preset.defaultHost})
+          </option>
+        ))}
+      </Select>
+      {headerSlot}
+    </div>
   );
 
   const handleClear = () => {
@@ -122,9 +162,9 @@ export function ConsoleWorkspace({ headerSlot, presetHost }: ConsoleWorkspacePro
 
   return (
     <RequestConsole
-      headerSlot={headerSlot}
+      headerSlot={envSwitcher}
       sidebarSlot={sidebar}
-      presetHost={presetHost}
+      presetHost={presetHost ?? activePreset?.defaultHost}
       externalDraft={draft}
       onExecuted={handleExecuted}
     />
