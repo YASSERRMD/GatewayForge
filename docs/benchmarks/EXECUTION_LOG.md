@@ -9,4 +9,5 @@
 
 | Phase | Branch | Start (UTC+4) | End (UTC+4) | Commits | PR | Merge SHA | Status |
 |---|---|---|---|---:|---|---|---|
-| 01 — Foundation | `phase/01-foundation` | 2026-11-22 06:59 | TBD | In progress | TBD | TBD | In progress |
+| 01 — Foundation | `phase/01-foundation` | 2026-11-22 06:59 | 2026-11-22 07:17 | 12 (11 planned + 1 CI version pin) | https://github.com/YASSERRMD/GatewayForge/pull/1 | `3ba739613f4ece7794755623792503337e2d2b30` | Merged |
+| 02 — Database | `phase/02-data-model` | 2026-11-22 07:18 | TBD | In progress | TBD | TBD | In progress |

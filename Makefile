@@ -1,6 +1,6 @@
 .PHONY: help check-layout deps fmt vet lint lint-go lint-web typecheck \
         test test-go test-race test-web build build-go build-web \
-        integration compose-config compose-up compose-down db-reset verify clean
+        integration compose-config compose-up compose-down db-reset migrate seed verify clean
 
 SHELL := /usr/bin/env bash
 
@@ -47,11 +47,13 @@ test-web: ## Run Vitest suite in apps/web
 
 test: test-go test-web ## Run unit test suites
 
-build-go: ## Build control-plane, gateway, and mock-upstream binaries into bin/
+build-go: ## Build control-plane, gateway, migrate, seed, and mock-upstream binaries into bin/
 	@mkdir -p bin
 	go build -o bin/control-plane ./cmd/control-plane
 	go build -o bin/gateway ./cmd/gateway
 	go build -o bin/mock-upstream ./cmd/mock-upstream
+	go build -o bin/migrate ./cmd/migrate
+	go build -o bin/seed ./cmd/seed
 
 build-web: ## Build production Next.js bundle
 	cd apps/web && npm run build
@@ -72,6 +74,12 @@ compose-down: ## Stop local Docker Compose stack
 
 db-reset: ## Reset local development PostgreSQL schema
 	@bash scripts/reset-db.sh
+
+migrate: ## Apply SQL migrations to local PostgreSQL
+	DATABASE_URL="$${DATABASE_URL:-postgres://gatewayforge:gatewayforge_local_dev_pw@127.0.0.1:5439/gatewayforge?sslmode=disable}" go run ./cmd/migrate up
+
+seed: ## Seed idempotent local demo fixtures into PostgreSQL
+	DATABASE_URL="$${DATABASE_URL:-postgres://gatewayforge:gatewayforge_local_dev_pw@127.0.0.1:5439/gatewayforge?sslmode=disable}" go run ./cmd/seed
 
 verify: check-layout fmt lint typecheck test-race test-web build compose-config ## Run full local quality gate
 	@echo "All GatewayForge quality gates passed."
