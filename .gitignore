@@ -1,0 +1,29 @@
+# Local secrets and env overrides
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# JS build artifacts / local deps
+node_modules/
+.next/
+coverage/
+playwright-report/
+test-results/
+apps/web/out/
+
+# Go binaries / coverage
+bin/
+*.test
+*.out
+coverage.txt
+
+# Editor and system
+.DS_Store
+.idea/
+.vscode/
+
+# Private temporary agent scratch and local captures
+temp/
+.gatewayforge-temp/
