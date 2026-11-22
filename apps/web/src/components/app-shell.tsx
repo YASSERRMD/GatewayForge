@@ -62,6 +62,17 @@ export function AppShell({
     setMobileOpen(false);
   }, [pathname]);
 
+  React.useEffect(() => {
+    if (!mobileOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setMobileOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [mobileOpen]);
+
   if (status === "loading") {
     return (
       <div className="min-h-screen bg-[var(--background)] p-8" aria-busy="true">
@@ -138,7 +149,13 @@ export function AppShell({
 
       {/* Mobile Drawer */}
       {mobileOpen && (
-        <div className="fixed inset-0 z-40 flex lg:hidden" role="dialog" aria-modal="true" aria-label="Mobile navigation">
+        <div
+          id="mobile-nav-drawer"
+          className="fixed inset-0 z-40 flex lg:hidden"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Mobile navigation"
+        >
           <div
             className="fixed inset-0 bg-slate-950/40"
             onClick={() => setMobileOpen(false)}
@@ -167,6 +184,7 @@ export function AppShell({
             <button
               type="button"
               aria-label="Open navigation menu"
+              aria-controls="mobile-nav-drawer"
               aria-expanded={mobileOpen}
               onClick={() => setMobileOpen((v) => !v)}
               className="rounded-md p-1.5 text-[var(--foreground)] hover:bg-[var(--muted)] lg:hidden focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
