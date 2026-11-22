@@ -14,15 +14,23 @@ import {
   defaultJwtConfig,
   validateAuthPolicyConfig,
 } from "@/components/management/auth-policy-form";
+import {
+  defaultQuotaConfig,
+  defaultRateLimitConfig,
+  RateLimitPolicyForm,
+  validateRateLimitPolicyConfig,
+} from "@/components/management/ratelimit-policy-form";
 import { ApiError, apiRequest } from "@/lib/api/client";
 import type { PaginatedResponse, PolicyItem, RouteItem, ServiceItem } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth-context";
 
-export type SupportedPolicyType = "api_key" | "jwt";
+export type SupportedPolicyType = "api_key" | "jwt" | "rate_limit" | "quota";
 
 export function defaultConfigForPolicyType(t: SupportedPolicyType): Record<string, unknown> {
   if (t === "api_key") return defaultApiKeyConfig() as unknown as Record<string, unknown>;
-  return defaultJwtConfig() as unknown as Record<string, unknown>;
+  if (t === "jwt") return defaultJwtConfig() as unknown as Record<string, unknown>;
+  if (t === "rate_limit") return defaultRateLimitConfig();
+  return defaultQuotaConfig();
 }
 
 export function PoliciesManager() {
@@ -117,7 +125,11 @@ export function PoliciesManager() {
     if (!policyName.trim() || policyName.trim().length > 120) {
       errs.name = "Policy name must be 1–120 characters.";
     }
-    Object.assign(errs, validateAuthPolicyConfig(policyType, config));
+    if (policyType === "api_key" || policyType === "jwt") {
+      Object.assign(errs, validateAuthPolicyConfig(policyType, config));
+    } else {
+      Object.assign(errs, validateRateLimitPolicyConfig(policyType, config));
+    }
     setFieldErrs(errs);
     if (Object.keys(errs).length > 0) return;
 
@@ -366,16 +378,27 @@ export function PoliciesManager() {
               >
                 <option value="api_key">API Key Auth (api_key)</option>
                 <option value="jwt">JWT Verification (jwt)</option>
+                <option value="rate_limit">Distributed Rate Limit (rate_limit)</option>
+                <option value="quota">UTC Usage Quota (quota)</option>
               </Select>
             </div>
           </div>
 
-          <AuthPolicyForm
-            policyType={policyType}
-            config={config}
-            errors={fieldErrs}
-            onChange={setConfig}
-          />
+          {policyType === "api_key" || policyType === "jwt" ? (
+            <AuthPolicyForm
+              policyType={policyType}
+              config={config}
+              errors={fieldErrs}
+              onChange={setConfig}
+            />
+          ) : (
+            <RateLimitPolicyForm
+              policyType={policyType}
+              config={config}
+              errors={fieldErrs}
+              onChange={setConfig}
+            />
+          )}
 
           <div className="flex justify-end gap-2 pt-2">
             <Button type="button" variant="outline" onClick={() => setCreateOpen(false)}>
