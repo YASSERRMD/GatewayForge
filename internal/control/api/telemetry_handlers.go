@@ -17,6 +17,7 @@ type TelemetryHandler struct {
 	Sessions           *auth.SessionManager
 	Heartbeats         *telemetry.HeartbeatStore
 	Aggregates         *telemetry.AggregateStore
+	Correlations       *telemetry.CorrelationStore
 	TraceViewerBaseURL string
 }
 
@@ -27,6 +28,7 @@ func (h *TelemetryHandler) MountTelemetryRoutes(v1 chi.Router) {
 	orgRead.Get("/orgs/{orgId}/metrics/summary", h.handleMetricsSummary)
 	orgRead.Get("/orgs/{orgId}/metrics/timeseries", h.handleMetricsTimeSeries)
 	orgRead.Get("/orgs/{orgId}/metrics/errors", h.handleMetricsErrors)
+	orgRead.Get("/orgs/{orgId}/telemetry/traces/{requestId}", h.handleTraceCorrelation)
 }
 
 func (h *TelemetryHandler) activeOrgRelease(r *http.Request, orgID string) (version int, checksum string) {
@@ -175,4 +177,50 @@ func (h *TelemetryHandler) handleMetricsErrors(w http.ResponseWriter, r *http.Re
 		return
 	}
 	WriteJSON(w, http.StatusOK, eb)
+}
+
+func (h *TelemetryHandler) handleTraceCorrelation(w http.ResponseWriter, r *http.Request) {
+	orgCtx, _ := OrgContextFromContext(r.Context())
+	reqID := chi.URLParam(r, "requestId")
+	if !telemetry.IsSafeRequestID(reqID) {
+		WriteProblem(w, r, http.StatusBadRequest, "invalid_request_id", "Invalid Request ID", "requestId must be 4..128 safe characters.")
+		return
+	}
+	if h.Correlations == nil {
+		WriteJSON(w, http.StatusOK, telemetry.TraceLinkResponse{
+			Found:                false,
+			TraceViewerAvailable: false,
+			UnavailableReason:    "telemetry correlation store is not configured",
+		})
+		return
+	}
+	rec, err := h.Correlations.Lookup(r.Context(), orgCtx.OrgID, reqID)
+	if err != nil {
+		WriteJSON(w, http.StatusOK, telemetry.TraceLinkResponse{
+			Found:                false,
+			TraceViewerAvailable: false,
+			UnavailableReason:    "telemetry backend temporarily unavailable",
+		})
+		return
+	}
+	if rec == nil {
+		WriteJSON(w, http.StatusOK, telemetry.TraceLinkResponse{
+			Found:                false,
+			TraceViewerAvailable: h.TraceViewerBaseURL != "",
+			UnavailableReason:    "request correlation not found or expired",
+		})
+		return
+	}
+
+	link, ok := telemetry.BuildTraceViewerURL(h.TraceViewerBaseURL, rec.TraceID)
+	resp := telemetry.TraceLinkResponse{
+		Found:                true,
+		TraceViewerAvailable: ok,
+		TraceURL:             link,
+		Record:               rec,
+	}
+	if !ok {
+		resp.UnavailableReason = "trace viewer URL is not configured (set TRACE_VIEWER_BASE_URL)"
+	}
+	WriteJSON(w, http.StatusOK, resp)
 }

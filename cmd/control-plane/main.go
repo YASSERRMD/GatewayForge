@@ -111,15 +111,18 @@ func main() {
 		}
 		var hbStore *telemetry.HeartbeatStore
 		var aggStore *telemetry.AggregateStore
+		var corrStore *telemetry.CorrelationStore
 		if redisClient != nil {
 			hbStore = telemetry.NewHeartbeatStore(redisClient, "")
 			aggStore = telemetry.NewAggregateStore(redisClient, "", telemetry.DefaultRetention)
+			corrStore = telemetry.NewCorrelationStore(redisClient, "", telemetry.DefaultCorrelationTTL)
 		}
 		telH := &api.TelemetryHandler{
 			Store:              st,
 			Sessions:           sessionMgr,
 			Heartbeats:         hbStore,
 			Aggregates:         aggStore,
+			Correlations:       corrStore,
 			TraceViewerBaseURL: os.Getenv("TRACE_VIEWER_BASE_URL"),
 		}
 

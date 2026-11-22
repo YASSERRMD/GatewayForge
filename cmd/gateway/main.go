@@ -62,14 +62,38 @@ func main() {
 			// Publish periodic gateway instance heartbeat for control-plane convergence monitoring.
 			hbStore := telemetry.NewHeartbeatStore(rc, "")
 			aggStore := telemetry.NewAggregateStore(rc, "", telemetry.DefaultRetention)
-			sampleCh := make(chan telemetry.TrafficSample, 2048)
+			corrStore := telemetry.NewCorrelationStore(rc, "", telemetry.DefaultCorrelationTTL)
+			sampleCh := make(chan proxy.RequestOutcome, 2048)
 			go func() {
 				for {
 					select {
 					case <-ctx.Done():
 						return
-					case s := <-sampleCh:
-						_ = aggStore.Record(ctx, s)
+					case out := <-sampleCh:
+						durMS := float64(out.Duration.Microseconds()) / 1000.0
+						_ = aggStore.Record(ctx, telemetry.TrafficSample{
+							Timestamp:  out.Timestamp,
+							OrgID:      out.OrgID,
+							RouteID:    out.RouteID,
+							ServiceID:  out.ServiceID,
+							Status:     out.Status,
+							Outcome:    out.Outcome,
+							DurationMS: durMS,
+						})
+						if out.RequestID != "" && out.TraceID != "" {
+							_ = corrStore.Record(ctx, telemetry.RequestCorrelation{
+								RequestID:  out.RequestID,
+								TraceID:    out.TraceID,
+								OrgID:      out.OrgID,
+								RouteID:    out.RouteID,
+								ServiceID:  out.ServiceID,
+								Method:     out.Method,
+								Status:     out.Status,
+								Outcome:    out.Outcome,
+								DurationMS: durMS,
+								Timestamp:  out.Timestamp,
+							})
+						}
 					}
 				}
 			}()
@@ -78,15 +102,7 @@ func main() {
 					return
 				}
 				select {
-				case sampleCh <- telemetry.TrafficSample{
-					Timestamp:  out.Timestamp,
-					OrgID:      out.OrgID,
-					RouteID:    out.RouteID,
-					ServiceID:  out.ServiceID,
-					Status:     out.Status,
-					Outcome:    out.Outcome,
-					DurationMS: float64(out.Duration.Microseconds()) / 1000.0,
-				}:
+				case sampleCh <- out:
 				default:
 					// Drop silently under extreme saturation rather than blocking the proxy hot path.
 				}
