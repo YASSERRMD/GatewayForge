@@ -2,11 +2,11 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/snapshot"
@@ -43,70 +43,37 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	match := tbl.Matcher.Match(r.Host, r.Method, r.URL.Path)
 	if !match.Matched {
 		if match.MethodMismatch {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"code":    "method_not_allowed",
-				"message": "HTTP method is not allowed for this route",
-				"status":  http.StatusMethodNotAllowed,
-			})
+			if len(match.AllowedMethods) > 0 {
+				w.Header().Set("Allow", strings.Join(match.AllowedMethods, ", "))
+			}
+			WriteGatewayError(w, r, http.StatusMethodNotAllowed, CodeMethodNotAllowed, "HTTP method is not allowed for this route")
 			return
 		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code":    "route_not_found",
-			"message": "no configured route matches this request",
-			"status":  http.StatusNotFound,
-		})
+		WriteGatewayError(w, r, http.StatusNotFound, CodeRouteNotFound, "no configured route matches this request")
 		return
 	}
 
 	pool, ok := tbl.Pools[match.Route.UpstreamPoolID]
 	if !ok {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code":    "upstream_unavailable",
-			"message": "configured upstream pool is unavailable",
-			"status":  http.StatusServiceUnavailable,
-		})
+		WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "configured upstream pool is unavailable")
 		return
 	}
 
 	target, ok := pickFirstEnabledTarget(pool)
 	if !ok {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code":    "upstream_unavailable",
-			"message": "no enabled targets available in upstream pool",
-			"status":  http.StatusServiceUnavailable,
-		})
+		WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "no enabled targets available in upstream pool")
 		return
 	}
 
 	targetURL, err := ValidateTargetURL(target.URL, e.Policy)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code":    "upstream_blocked",
-			"message": "upstream target blocked by destination policy",
-			"status":  http.StatusBadGateway,
-		})
+		WriteGatewayError(w, r, http.StatusBadGateway, CodeUpstreamBlocked, "upstream target blocked by destination policy")
 		return
 	}
 
 	upstreamURL, err := BuildUpstreamURL(targetURL, r, match.Route.PathPrefix, match.Route.StripPrefix)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code":    "request_invalid",
-			"message": "request URI rejected by proxy safety rules",
-			"status":  http.StatusBadRequest,
-		})
+		WriteGatewayError(w, r, http.StatusBadRequest, CodeRequestInvalid, "request URI rejected by proxy safety rules")
 		return
 	}
 
@@ -132,25 +99,14 @@ func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstream
 			return nil
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
-			status := http.StatusBadGateway
-			code := "bad_gateway"
-			msg := "upstream request failed"
-			if errors.Is(proxyErr, context.DeadlineExceeded) {
-				status = http.StatusGatewayTimeout
-				code = "upstream_timeout"
-				msg = "upstream did not respond before deadline"
-			} else if errors.Is(proxyErr, ErrBlockedDestination) {
-				status = http.StatusBadGateway
-				code = "upstream_blocked"
-				msg = "upstream destination blocked by policy"
+			switch {
+			case errors.Is(proxyErr, context.DeadlineExceeded):
+				WriteGatewayError(rw, req, http.StatusGatewayTimeout, CodeUpstreamTimeout, "upstream did not respond before deadline")
+			case errors.Is(proxyErr, ErrBlockedDestination):
+				WriteGatewayError(rw, req, http.StatusBadGateway, CodeUpstreamBlocked, "upstream destination blocked by policy")
+			default:
+				WriteGatewayError(rw, req, http.StatusBadGateway, CodeBadGateway, "upstream request failed")
 			}
-			rw.Header().Set("Content-Type", "application/json; charset=utf-8")
-			rw.WriteHeader(status)
-			_ = json.NewEncoder(rw).Encode(map[string]any{
-				"code":    code,
-				"message": msg,
-				"status":  status,
-			})
 		},
 	}
 	rp.ServeHTTP(w, r)
