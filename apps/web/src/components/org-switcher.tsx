@@ -19,8 +19,8 @@ export function OrgSwitcher() {
   }
 
   return (
-    <div className="flex items-center gap-2">
-      <Building2 className="h-4 w-4 shrink-0 text-[var(--muted-foreground)]" aria-hidden="true" />
+    <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
+      <Building2 className="hidden h-4 w-4 shrink-0 text-[var(--muted-foreground)] sm:block" aria-hidden="true" />
       <label htmlFor="org-switcher-select" className="sr-only">
         Active organization
       </label>
@@ -29,7 +29,7 @@ export function OrgSwitcher() {
         aria-label="Active organization"
         value={activeOrgId ?? ""}
         onChange={(e) => selectOrg(e.target.value)}
-        className="h-8 w-auto min-w-[170px] max-w-[260px] text-sm font-medium"
+        className="h-8 min-w-0 max-w-[150px] truncate text-xs font-medium sm:w-auto sm:min-w-[170px] sm:max-w-[260px] sm:text-sm"
       >
         {memberships.map((m) => (
           <option key={m.org_id} value={m.org_id}>
@@ -42,6 +42,7 @@ export function OrgSwitcher() {
           variant={
             activeOrg.role === "owner" || activeOrg.role === "admin" ? "success" : "default"
           }
+          className="shrink-0"
           data-testid="active-org-role"
         >
           {activeOrg.role}

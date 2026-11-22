@@ -199,6 +199,26 @@ services:
     networks:
       - gatewayforge-internal
 
+  mock-upstream-2:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.mock-upstream
+    profiles: ["test"]
+    restart: unless-stopped
+    environment:
+      MOCK_UPSTREAM_ADDR: ":8089"
+      MOCK_UPSTREAM_INSTANCE: "mock-upstream-2"
+    ports:
+      - "127.0.0.1:${MOCK_UPSTREAM_2_PORT:-18090}:8089"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8089/health >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    networks:
+      - gatewayforge-internal
+
 volumes:
   gatewayforge_pgdata:
 

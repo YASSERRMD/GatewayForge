@@ -77,10 +77,10 @@ export function RecentActivityPanel({
                         {ev.resource_type}
                       </span>
                     </div>
-                    <p className="mt-0.5 flex items-center gap-1.5 text-xs text-[var(--muted-foreground)]">
-                      <Clock className="h-3 w-3" aria-hidden="true" />
+                    <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-[var(--muted-foreground)]">
+                      <Clock className="h-3 w-3 shrink-0" aria-hidden="true" />
                       <span>{new Date(ev.created_at).toLocaleString()}</span>
-                      {ev.request_id && <span className="font-mono">· {ev.request_id}</span>}
+                      {ev.request_id && <span className="font-mono break-all">· {ev.request_id}</span>}
                     </p>
                   </div>
                   <Button
