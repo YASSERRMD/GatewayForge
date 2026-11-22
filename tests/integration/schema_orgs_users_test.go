@@ -63,4 +63,19 @@ func TestSchemaOrgsUsersMembershipsConstraints(t *testing.T) {
 	); err == nil {
 		t.Fatal("expected unique violation on duplicate org/user membership")
 	}
+
+	// Unknown role must fail foreign key against roles table.
+	var user2ID string
+	err = pool.QueryRow(ctx,
+		`INSERT INTO users (email, display_name, password_hash) VALUES ('other@acme.test', 'Other', 'hash') RETURNING id`,
+	).Scan(&user2ID)
+	if err != nil {
+		t.Fatalf("insert second user: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO memberships (org_id, user_id, role) VALUES ($1, $2, 'superadmin')`,
+		orgID, user2ID,
+	); err == nil {
+		t.Fatal("expected FK violation for unknown role 'superadmin'")
+	}
 }
