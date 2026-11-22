@@ -48,7 +48,7 @@ func TestGatewayHealthAndDefaultDeny(t *testing.T) {
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("expected 404, got %d", rec.Code)
 		}
-		var body map[string]string
+		var body map[string]any
 		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 			t.Fatalf("decode: %v", err)
 		}

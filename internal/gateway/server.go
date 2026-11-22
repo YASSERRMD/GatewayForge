@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -11,15 +10,20 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/YASSERRMD/GatewayForge/internal/gateway/proxy"
+	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/health"
 )
 
 // ServerConfig configures the gateway data-plane HTTP listener.
 type ServerConfig struct {
-	Addr              string
-	ReadHeaderTimeout time.Duration
-	IdleTimeout       time.Duration
-	ShutdownTimeout   time.Duration
+	Addr               string
+	ReadHeaderTimeout  time.Duration
+	IdleTimeout        time.Duration
+	ShutdownTimeout    time.Duration
+	AllowMockUpstreams bool
+	AllowLoopback      bool
+	TrustedProxyCIDRs  []string
 }
 
 // DefaultServerConfig returns safe defaults for the gateway data plane.
@@ -35,23 +39,28 @@ func DefaultServerConfig() ServerConfig {
 		}
 	}
 	return ServerConfig{
-		Addr:              addr,
-		ReadHeaderTimeout: 5 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		ShutdownTimeout:   time.Duration(shutdownSec) * time.Second,
+		Addr:               addr,
+		ReadHeaderTimeout:  5 * time.Second,
+		IdleTimeout:        60 * time.Second,
+		ShutdownTimeout:    time.Duration(shutdownSec) * time.Second,
+		AllowMockUpstreams: os.Getenv("ALLOW_MOCK_UPSTREAMS") == "true",
 	}
 }
 
-// Server wraps the independent gateway data-plane HTTP server and health probes.
+// Server wraps the independent gateway data-plane HTTP server, immutable routing table,
+// SSRF-safe HTTP transport, proxy engine, and health probes.
 type Server struct {
 	cfg        ServerConfig
 	httpServer *http.Server
 	health     *health.Registry
+	holder     *table.Holder
+	transport  *http.Transport
+	engine     *proxy.Engine
 	mux        *http.ServeMux
 }
 
 // NewServer constructs a gateway data-plane server with independent health endpoints
-// and a deny-by-default fallback handler (no open proxy).
+// and a deny-by-default reverse-proxy engine.
 func NewServer(cfg ServerConfig) *Server {
 	if cfg.Addr == "" {
 		cfg.Addr = ":8081"
@@ -64,17 +73,21 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 
 	reg := health.NewRegistry("gateway")
+	holder := table.NewHolder()
+	pol := proxy.DefaultDestinationPolicy(cfg.AllowMockUpstreams)
+	pol.AllowLoopback = cfg.AllowLoopback
+	tr := proxy.NewSafeTransport(proxy.DefaultTransportConfig(), pol)
+	eng := proxy.NewEngine(holder, tr, pol)
+	if len(cfg.TrustedProxyCIDRs) > 0 {
+		if trusted, err := proxy.ParseTrustedProxies(cfg.TrustedProxyCIDRs); err == nil {
+			eng.TrustedProxies = trusted
+		}
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", reg.LiveHandler())
 	mux.HandleFunc("/health/ready", reg.ReadyHandler())
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"code":    "route_not_found",
-			"message": "no configured route matches this request",
-		})
-	})
+	mux.Handle("/", eng)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -87,6 +100,9 @@ func NewServer(cfg ServerConfig) *Server {
 		cfg:        cfg,
 		httpServer: srv,
 		health:     reg,
+		holder:     holder,
+		transport:  tr,
+		engine:     eng,
 		mux:        mux,
 	}
 }
@@ -96,12 +112,23 @@ func (s *Server) Health() *health.Registry {
 	return s.health
 }
 
+// TableHolder returns the atomic routing table holder for snapshot updates.
+func (s *Server) TableHolder() *table.Holder {
+	return s.holder
+}
+
+// Engine returns the reverse-proxy engine.
+func (s *Server) Engine() *proxy.Engine {
+	return s.engine
+}
+
 // Handler returns the root HTTP handler.
 func (s *Server) Handler() http.Handler {
 	return s.mux
 }
 
-// Serve serves requests on ln until ctx is canceled, then drains cleanly.
+// Serve serves requests on ln until ctx is canceled, then drains in-flight requests
+// and closes outbound idle connections cleanly.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	errCh := make(chan error, 1)
 	go func() {
@@ -114,12 +141,15 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 
 	select {
 	case err := <-errCh:
+		s.transport.CloseIdleConnections()
 		return err
 	case <-ctx.Done():
 		s.health.SetDraining(true)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
 		defer cancel()
-		if err := s.httpServer.Shutdown(shutdownCtx); err != nil {
+		err := s.httpServer.Shutdown(shutdownCtx)
+		s.transport.CloseIdleConnections()
+		if err != nil {
 			return fmt.Errorf("gateway shutdown: %w", err)
 		}
 		return <-errCh
