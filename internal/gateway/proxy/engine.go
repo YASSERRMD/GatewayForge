@@ -32,6 +32,7 @@ type Engine struct {
 	RateLimit      *ratelimit.Enforcer
 	Health         *resilience.HealthTracker
 	CircuitBreaker *resilience.CircuitBreakerRegistry
+	Bulkhead       *resilience.BulkheadRegistry
 }
 
 // NewEngine creates a streaming reverse-proxy Engine backed by holder.
@@ -49,6 +50,7 @@ func NewEngine(holder *table.Holder, transport http.RoundTripper, pol Destinatio
 		Limits:         DefaultResourceLimits(),
 		Selector:       balancer.NewWeightedRoundRobin(),
 		CircuitBreaker: resilience.NewCircuitBreakerRegistry(nil),
+		Bulkhead:       resilience.NewBulkheadRegistry(256),
 	}
 }
 
@@ -122,6 +124,19 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "configured upstream pool is unavailable")
 		return
+	}
+
+	// Enforce per-route/upstream bulkhead concurrency cap before dialing upstream.
+	if e.Bulkhead != nil {
+		bhKey := tbl.OrgID + "|" + match.Route.ID
+		bhLimit := resilience.ResolveMaxConcurrent(match.Route.Policies, 0)
+		releaseBH, ok := e.Bulkhead.Acquire(bhKey, bhLimit)
+		if !ok {
+			w.Header().Set("Retry-After", "1")
+			WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeServiceOverloaded, "route concurrency limit reached")
+			return
+		}
+		defer releaseBH()
 	}
 
 	// Evaluate per-pool/route circuit breaker before forwarding.
