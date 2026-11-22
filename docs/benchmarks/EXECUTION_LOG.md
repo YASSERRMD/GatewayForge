@@ -17,4 +17,5 @@
 | 06 — Consumer auth | `phase/06-consumer-security` | 2026-11-22 08:17 | 2026-11-22 08:39 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/6 | `e9eb0eb43db7a8533166c1f5c8a448340fb43f40` | Merged |
 | 07 — Rate limits | `phase/07-rate-limits` | 2026-11-22 08:39 | 2026-11-22 08:52 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/7 | `2c1d1378fe20d37d76ae0077a901a84c4c27cd53` | Merged |
 | 08 — Resilience | `phase/08-resilience` | 2026-11-22 08:52 | 2026-11-22 09:08 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/8 | `351db49c4c232caca36645290d92e6590e2c17c8` | Merged |
-| 09 — Observability | `phase/09-observability` | 2026-11-22 09:08 | TBD | In progress | TBD | TBD | In progress |
+| 09 — Observability | `phase/09-observability` | 2026-11-22 09:08 | 2026-11-22 09:25 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/9 | `90b4b0e7aabbd1fcfd626228fe7d71b5408e37c0` | Merged |
+| 10 — Dashboard UI | `phase/10-dashboard` | 2026-11-22 09:26 | TBD | In progress | TBD | TBD | In progress |
