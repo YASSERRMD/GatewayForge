@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 
+	gwauth "github.com/YASSERRMD/GatewayForge/internal/gateway/auth"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/balancer"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
 )
@@ -20,6 +21,7 @@ type Engine struct {
 	TrustedProxies TrustedProxyConfig
 	Limits         ResourceLimits
 	Selector       balancer.Selector
+	Auth           *gwauth.Enforcer
 }
 
 // NewEngine creates a streaming reverse-proxy Engine backed by holder.
@@ -57,6 +59,17 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enforce route/service/org consumer authentication & scopes before proxying.
+	_, stripHeaders, authErr := e.Auth.Enforce(r, tbl, match.Route)
+	if authErr != nil {
+		if errors.Is(authErr, gwauth.ErrForbidden) {
+			WriteGatewayError(w, r, http.StatusForbidden, CodeForbidden, "insufficient scope for this route")
+			return
+		}
+		WriteGatewayError(w, r, http.StatusUnauthorized, CodeUnauthorized, "authentication required")
+		return
+	}
+
 	pool, ok := tbl.Pools[match.Route.UpstreamPoolID]
 	if !ok {
 		WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "configured upstream pool is unavailable")
@@ -91,10 +104,10 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cancel()
 
-	e.proxyStreaming(w, limitedReq, upstreamURL, corr)
+	e.proxyStreaming(w, limitedReq, upstreamURL, corr, stripHeaders)
 }
 
-func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL, corr Correlation) {
+func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL, corr Correlation, stripHeaders []string) {
 	rp := &httputil.ReverseProxy{
 		Transport:     e.Transport,
 		FlushInterval: -1, // stream response chunks immediately without buffering
@@ -106,6 +119,9 @@ func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstream
 			pr.Out.URL.RawQuery = upstreamURL.RawQuery
 			pr.Out.Host = upstreamURL.Host
 			SanitizeOutboundHeaders(pr.In, pr.Out, e.TrustedProxies)
+			for _, hdr := range stripHeaders {
+				pr.Out.Header.Del(hdr)
+			}
 			ApplyCorrelationOutbound(pr.Out, corr)
 		},
 		ModifyResponse: func(resp *http.Response) error {
