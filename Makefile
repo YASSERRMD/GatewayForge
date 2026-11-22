@@ -1,11 +1,22 @@
-.PHONY: help check-layout deps fmt vet lint lint-go lint-web typecheck \
-        test test-go test-race test-web security-test build build-go build-web \
+.PHONY: help dev dev-observability check-layout deps fmt vet lint lint-go lint-web typecheck \
+        test test-go test-race test-web security-test e2e load build build-go build-web \
         integration compose-config compose-up compose-down db-reset migrate seed verify clean
 
 SHELL := /usr/bin/env bash
 
 help: ## Show available GatewayForge targets
 	@awk 'BEGIN {FS = ":.*##"; printf "\nGatewayForge Makefile Targets:\n\n"} /^[a-zA-Z0-9_-]+:.*?##/ { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+
+dev: ## Start local Docker Compose stack, apply migrations, and seed demo fixtures
+	docker compose up -d --build --wait
+	$(MAKE) migrate
+	$(MAKE) seed
+	@echo "GatewayForge ready: Studio http://127.0.0.1:3000 | Control Plane http://127.0.0.1:18080 | Gateway http://127.0.0.1:18081"
+
+dev-observability: ## Start full stack including Prometheus (:19090) and Jaeger (:16686)
+	docker compose --profile observability up -d --build --wait
+	$(MAKE) migrate
+	$(MAKE) seed
 
 check-layout: ## Verify required monorepo directory layout
 	@bash scripts/check-layout.sh
@@ -68,8 +79,16 @@ build: build-go build-web ## Build all binaries and web app
 integration: ## Run Go integration tests against running Compose infrastructure
 	INTEGRATION_TESTS=1 go test -v -race ./tests/integration/...
 
-compose-config: ## Validate docker-compose.yml
+e2e: ## Run Compose-backed Playwright end-to-end suite (serial workers)
+	cd apps/web && npx playwright test --workers=1
+
+load: ## Run reproducible Go load benchmark profile against local gateway stack
+	go test -v ./tests/load/...
+
+compose-config: ## Validate all Docker Compose profiles
 	docker compose config --quiet
+	docker compose --profile observability config --quiet
+	docker compose --profile test config --quiet
 
 compose-up: ## Start local Docker Compose stack
 	docker compose up -d --build --wait
