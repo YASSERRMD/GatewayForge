@@ -8,8 +8,8 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/YASSERRMD/GatewayForge/internal/gateway/balancer"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
-	"github.com/YASSERRMD/GatewayForge/internal/shared/snapshot"
 )
 
 // Engine executes reverse-proxy requests against the active immutable routing table.
@@ -19,6 +19,7 @@ type Engine struct {
 	Policy         DestinationPolicy
 	TrustedProxies TrustedProxyConfig
 	Limits         ResourceLimits
+	Selector       balancer.Selector
 }
 
 // NewEngine creates a streaming reverse-proxy Engine backed by holder.
@@ -34,6 +35,7 @@ func NewEngine(holder *table.Holder, transport http.RoundTripper, pol Destinatio
 		Transport: transport,
 		Policy:    pol,
 		Limits:    DefaultResourceLimits(),
+		Selector:  balancer.NewWeightedRoundRobin(),
 	}
 }
 
@@ -61,8 +63,12 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target, ok := pickFirstEnabledTarget(pool)
-	if !ok {
+	sel := e.Selector
+	if sel == nil {
+		sel = balancer.NewWeightedRoundRobin()
+	}
+	target, err := sel.Pick(pool, nil)
+	if err != nil {
 		WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "no enabled targets available in upstream pool")
 		return
 	}
@@ -124,13 +130,4 @@ func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstream
 		},
 	}
 	rp.ServeHTTP(w, r)
-}
-
-func pickFirstEnabledTarget(pool snapshot.UpstreamPool) (snapshot.UpstreamTarget, bool) {
-	for _, t := range pool.Targets {
-		if t.Enabled {
-			return t, true
-		}
-	}
-	return snapshot.UpstreamTarget{}, false
 }
