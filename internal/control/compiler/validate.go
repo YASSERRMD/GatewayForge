@@ -168,6 +168,21 @@ func ValidateDraft(in DraftInput, pol netsec.TargetPolicy) ValidationReport {
 				addErr("invalid_quota_policy", resName, err.Error())
 			}
 		}
+		if p.PolicyType == "retry" {
+			if _, err := policy.ParseRetryPolicy(p.Config); err != nil {
+				addErr("invalid_retry_policy", resName, err.Error())
+			}
+		}
+		if p.PolicyType == "timeout" {
+			if _, err := policy.ParseTimeoutPolicy(p.Config); err != nil {
+				addErr("invalid_timeout_policy", resName, err.Error())
+			}
+		}
+		if p.PolicyType == "circuit_breaker" {
+			if _, err := policy.ParseCircuitBreakerPolicy(p.Config); err != nil {
+				addErr("invalid_circuit_breaker_policy", resName, err.Error())
+			}
+		}
 	}
 
 	for _, att := range in.Attachments {
