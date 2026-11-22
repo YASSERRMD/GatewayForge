@@ -1,11 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Download, FileUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { FieldError, Input, Label, Select } from "@/components/ui/input";
 import { ErrorBanner } from "@/components/ui/states";
+import { OpenAPIImportDialog } from "@/components/management/openapi-import-dialog";
 import { RoutesView, type RoutesLoadedContext } from "@/components/management/routes-view";
 import { ApiError, apiRequest } from "@/lib/api/client";
 import type { RouteItem, ServiceItem, UpstreamPoolItem } from "@/lib/api/types";
@@ -64,6 +65,7 @@ export function RoutesManager() {
 
   const [deleting, setDeleting] = React.useState<RouteItem | null>(null);
   const [deleteErr, setDeleteErr] = React.useState<string | null>(null);
+  const [importOpen, setImportOpen] = React.useState(false);
 
   const handleDataLoaded = React.useCallback((ctx: RoutesLoadedContext) => {
     setRoutes(ctx.routes);
@@ -234,6 +236,22 @@ export function RoutesManager() {
 
   return (
     <>
+      <div className="mb-3 flex justify-end gap-2">
+        {activeOrgId && (
+          <a
+            href={`/api/v1/orgs/${activeOrgId}/openapi/export`}
+            download="gatewayforge-openapi.json"
+            className="inline-flex h-8 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--card)] px-3 text-xs font-medium text-[var(--foreground)] transition-colors hover:bg-[var(--muted)]"
+          >
+            <Download className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+            Export OpenAPI
+          </a>
+        )}
+        <Button type="button" variant="outline" size="sm" onClick={() => setImportOpen(true)}>
+          <FileUp className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+          Import OpenAPI
+        </Button>
+      </div>
       <RoutesView
         reloadKey={reloadKey}
         onCreate={openCreate}
@@ -243,6 +261,13 @@ export function RoutesManager() {
           setDeleting(rt);
         }}
         onDataLoaded={handleDataLoaded}
+      />
+
+      <OpenAPIImportDialog
+        open={importOpen}
+        pools={pools}
+        onClose={() => setImportOpen(false)}
+        onImported={() => setReloadKey((k) => k + 1)}
       />
 
       <Dialog

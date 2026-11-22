@@ -79,6 +79,7 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:-dev-only-session-secret-change-me-32chars-minimum}
       GATEWAY_SYNC_TOKEN: ${GATEWAY_SYNC_TOKEN:-dev-only-gateway-sync-token-123456}
       ALLOW_MOCK_UPSTREAMS: ${ALLOW_MOCK_UPSTREAMS:-true}
+      GATEWAY_PROXY_URL: ${GATEWAY_PROXY_URL:-http://gateway:8081}
       TRACE_VIEWER_BASE_URL: ${TRACE_VIEWER_BASE_URL:-}
     ports:
       - "127.0.0.1:${CONTROL_PLANE_PORT:-18080}:8080"
