@@ -17,6 +17,7 @@ import (
 	"github.com/YASSERRMD/GatewayForge/internal/control/rbac"
 	"github.com/YASSERRMD/GatewayForge/internal/control/store"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/netsec"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/snapshot"
 )
 
 // ActivationEvent is emitted strictly AFTER a PostgreSQL publication/activation commit succeeds.
@@ -40,6 +41,7 @@ type PublicationHandler struct {
 func (h *PublicationHandler) MountPublicationRoutes(v1 chi.Router) {
 	orgAuth := v1.With(RequireAuth(h.Sessions), RequireOrgContext(h.Sessions), AuditMutationsMiddleware(h.Audit))
 	orgAuth.With(RequirePermission(rbac.PermConfigRead)).Get("/orgs/{orgId}/draft", h.handleGetDraft)
+	orgAuth.With(RequirePermission(rbac.PermConfigRead)).Get("/orgs/{orgId}/draft/diff", h.handleDiffDraft)
 	orgAuth.With(RequirePermission(rbac.PermConfigRead)).Post("/orgs/{orgId}/draft/validate", h.handleValidateDraft)
 	orgAuth.Route("/orgs/{orgId}/publications", func(r chi.Router) {
 		r.With(RequirePermission(rbac.PermReleaseRead)).Get("/", h.handleListPublications)
@@ -66,6 +68,41 @@ func (h *PublicationHandler) handleGetDraft(w http.ResponseWriter, r *http.Reque
 		"validation":     report,
 		"preview":        preview,
 	})
+}
+
+func (h *PublicationHandler) handleDiffDraft(w http.ResponseWriter, r *http.Request) {
+	orgCtx, _ := OrgContextFromContext(r.Context())
+	draft, err := compiler.LoadDraftFromDB(r.Context(), h.Store.Pool(), orgCtx.OrgID)
+	if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Draft Load Failed", "Could not load draft for diff.")
+		return
+	}
+	candidate, err := compiler.Compile(draft, 0, time.Now().UTC())
+	if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Draft Compile Failed", "Could not compile draft for diff.")
+		return
+	}
+
+	var activeSnap *snapshot.Snapshot
+	var snapRaw json.RawMessage
+	err = h.Store.Pool().QueryRow(r.Context(), `
+		SELECT p.snapshot_json
+		FROM active_publications ap
+		JOIN publications p ON p.id = ap.publication_id
+		WHERE ap.org_id = $1
+	`, orgCtx.OrgID).Scan(&snapRaw)
+	if err == nil && len(snapRaw) > 0 {
+		var parsed snapshot.Snapshot
+		if uErr := json.Unmarshal(snapRaw, &parsed); uErr == nil {
+			activeSnap = &parsed
+		}
+	} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not load active snapshot for diff.")
+		return
+	}
+
+	diff := compiler.DiffSnapshots(activeSnap, candidate)
+	WriteJSON(w, http.StatusOK, diff)
 }
 
 func (h *PublicationHandler) handleValidateDraft(w http.ResponseWriter, r *http.Request) {
@@ -421,6 +458,31 @@ func (h *PublicationHandler) handleActivatePublication(w http.ResponseWriter, r 
 		return
 	}
 	committed = true
+
+	if h.Audit != nil {
+		action := "publication.activate"
+		if isRollback {
+			action = "publication.rollback"
+		}
+		_ = h.Audit.RecordRedacted(
+			r.Context(),
+			&orgCtx.OrgID,
+			&principal.UserID,
+			principal.Email,
+			action,
+			"publication",
+			targetPubID,
+			RequestIDFromContext(r.Context()),
+			map[string]any{"active_version": currentActiveVer},
+			map[string]any{
+				"active_version":      version,
+				"checksum":            checksum,
+				"is_rollback":         isRollback,
+				"reason":              strings.TrimSpace(in.Reason),
+				"activation_revision": nextActRev,
+			},
+		)
+	}
 
 	if h.OnActivated != nil {
 		h.OnActivated(r.Context(), ActivationEvent{
