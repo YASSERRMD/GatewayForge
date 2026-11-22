@@ -26,16 +26,15 @@ type ServiceHandler struct {
 
 // MountServiceRoutes mounts /orgs/{orgId}/environments and /orgs/{orgId}/services routes on v1.
 func (h *ServiceHandler) MountServiceRoutes(v1 chi.Router) {
-	v1.With(RequireAuth(h.Sessions), RequireOrgContext(h.Sessions), AuditMutationsMiddleware(h.Audit)).Route("/orgs/{orgId}", func(r chi.Router) {
-		r.With(RequirePermission(rbac.PermConfigRead)).Get("/environments", h.handleListEnvironments)
+	v1.With(RequireAuth(h.Sessions), RequireOrgContext(h.Sessions), RequirePermission(rbac.PermConfigRead)).
+		Get("/orgs/{orgId}/environments", h.handleListEnvironments)
 
-		r.Route("/services", func(sr chi.Router) {
-			sr.With(RequirePermission(rbac.PermConfigRead)).Get("/", h.handleListServices)
-			sr.With(RequirePermission(rbac.PermConfigWrite)).Post("/", h.handleCreateService)
-			sr.With(RequirePermission(rbac.PermConfigRead)).Get("/{serviceId}", h.handleGetService)
-			sr.With(RequirePermission(rbac.PermConfigWrite)).Patch("/{serviceId}", h.handleUpdateService)
-			sr.With(RequirePermission(rbac.PermConfigWrite)).Delete("/{serviceId}", h.handleDeleteService)
-		})
+	v1.With(RequireAuth(h.Sessions), RequireOrgContext(h.Sessions), AuditMutationsMiddleware(h.Audit)).Route("/orgs/{orgId}/services", func(sr chi.Router) {
+		sr.With(RequirePermission(rbac.PermConfigRead)).Get("/", h.handleListServices)
+		sr.With(RequirePermission(rbac.PermConfigWrite)).Post("/", h.handleCreateService)
+		sr.With(RequirePermission(rbac.PermConfigRead)).Get("/{serviceId}", h.handleGetService)
+		sr.With(RequirePermission(rbac.PermConfigWrite)).Patch("/{serviceId}", h.handleUpdateService)
+		sr.With(RequirePermission(rbac.PermConfigWrite)).Delete("/{serviceId}", h.handleDeleteService)
 	})
 }
 

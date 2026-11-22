@@ -120,6 +120,36 @@ services:
     networks:
       - gatewayforge-internal
 
+  gateway-2:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.gateway
+    restart: unless-stopped
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      GATEWAYFORGE_ENV: ${GATEWAYFORGE_ENV:-development}
+      GATEWAY_INSTANCE_ID: "gateway-2"
+      GATEWAY_ADDR: ":8081"
+      CONTROL_PLANE_URL: http://control-plane:8080
+      GATEWAY_SYNC_TOKEN: ${GATEWAY_SYNC_TOKEN:-dev-only-gateway-sync-token-123456}
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-gatewayforge_local_redis_pw}
+      ALLOW_MOCK_UPSTREAMS: ${ALLOW_MOCK_UPSTREAMS:-true}
+    ports:
+      - "127.0.0.1:${GATEWAY_2_PORT:-18082}:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/health/ready >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    networks:
+      - gatewayforge-internal
+
   web:
     build:
       context: .

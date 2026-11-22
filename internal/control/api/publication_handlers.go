@@ -38,12 +38,13 @@ type PublicationHandler struct {
 
 // MountPublicationRoutes mounts /orgs/{orgId}/draft* and /orgs/{orgId}/publications* under v1.
 func (h *PublicationHandler) MountPublicationRoutes(v1 chi.Router) {
-	v1.With(RequireAuth(h.Sessions), RequireOrgContext(h.Sessions), AuditMutationsMiddleware(h.Audit)).Route("/orgs/{orgId}", func(r chi.Router) {
-		r.With(RequirePermission(rbac.PermConfigRead)).Get("/draft", h.handleGetDraft)
-		r.With(RequirePermission(rbac.PermConfigRead)).Post("/draft/validate", h.handleValidateDraft)
-		r.With(RequirePermission(rbac.PermReleaseRead)).Get("/publications", h.handleListPublications)
-		r.With(RequirePermission(rbac.PermReleasePublish)).Post("/publications", h.handleCreatePublication)
-		r.With(RequirePermission(rbac.PermReleaseActivate)).Post("/publications/{version}/activate", h.handleActivatePublication)
+	orgAuth := v1.With(RequireAuth(h.Sessions), RequireOrgContext(h.Sessions), AuditMutationsMiddleware(h.Audit))
+	orgAuth.With(RequirePermission(rbac.PermConfigRead)).Get("/orgs/{orgId}/draft", h.handleGetDraft)
+	orgAuth.With(RequirePermission(rbac.PermConfigRead)).Post("/orgs/{orgId}/draft/validate", h.handleValidateDraft)
+	orgAuth.Route("/orgs/{orgId}/publications", func(r chi.Router) {
+		r.With(RequirePermission(rbac.PermReleaseRead)).Get("/", h.handleListPublications)
+		r.With(RequirePermission(rbac.PermReleasePublish)).Post("/", h.handleCreatePublication)
+		r.With(RequirePermission(rbac.PermReleaseActivate)).Post("/{version}/activate", h.handleActivatePublication)
 	})
 }
 
