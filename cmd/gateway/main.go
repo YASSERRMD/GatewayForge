@@ -15,6 +15,7 @@ import (
 	"github.com/YASSERRMD/GatewayForge/internal/shared/config"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/events"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/redact"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/telemetry"
 )
 
 func main() {
@@ -56,6 +57,38 @@ func main() {
 				ratelimit.NewRedisQuotaCounter(rc, 250*time.Millisecond),
 				nil,
 			))
+
+			// Publish periodic gateway instance heartbeat for control-plane convergence monitoring.
+			hbStore := telemetry.NewHeartbeatStore(rc, "")
+			instanceID, _ := os.Hostname()
+			if instanceID == "" {
+				instanceID = "gateway-local"
+			}
+			buildVer := buildinfo.ForService("gateway").Version
+			go func() {
+				ticker := time.NewTicker(telemetry.DefaultHBInterval)
+				defer ticker.Stop()
+				emit := func() {
+					cur := srv.TableHolder().Current()
+					_ = hbStore.Publish(ctx, telemetry.GatewayHeartbeat{
+						InstanceID:    instanceID,
+						OrgID:         cur.OrgID,
+						ActiveVersion: cur.Version,
+						Checksum:      cur.Checksum,
+						Ready:         cur.Version > 0,
+						BuildVersion:  buildVer,
+					})
+				}
+				emit()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						emit()
+					}
+				}
+			}()
 		}
 	} else {
 		srv.AttachRateLimiter(ratelimit.NewEnforcer(
