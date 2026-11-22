@@ -37,9 +37,10 @@ type ConsumerHandler struct {
 	OnKeyChanged func(r *http.Request, orgID string)
 }
 
-// MountConsumerRoutes registers /orgs/{orgId}/consumers and /keys routes under v1.
+// MountConsumerRoutes registers /orgs/{orgId}/consumers and /orgs/{orgId}/keys routes under v1.
 func (h *ConsumerHandler) MountConsumerRoutes(v1 chi.Router) {
-	v1.With(RequireAuth(h.Sessions), RequireOrgContext(h.Sessions), AuditMutationsMiddleware(h.Audit)).Route("/orgs/{orgId}/consumers", func(r chi.Router) {
+	orgAuth := v1.With(RequireAuth(h.Sessions), RequireOrgContext(h.Sessions), AuditMutationsMiddleware(h.Audit))
+	orgAuth.Route("/orgs/{orgId}/consumers", func(r chi.Router) {
 		r.With(RequirePermission(rbac.PermConsumerRead)).Get("/", h.handleListConsumers)
 		r.With(RequirePermission(rbac.PermConsumerWrite)).Post("/", h.handleCreateConsumer)
 		r.With(RequirePermission(rbac.PermConsumerRead)).Get("/{consumerId}", h.handleGetConsumer)
@@ -47,6 +48,10 @@ func (h *ConsumerHandler) MountConsumerRoutes(v1 chi.Router) {
 		r.With(RequirePermission(rbac.PermConsumerWrite)).Delete("/{consumerId}", h.handleDeleteConsumer)
 		r.With(RequirePermission(rbac.PermConsumerRead)).Get("/{consumerId}/keys", h.handleListConsumerKeys)
 		r.With(RequirePermission(rbac.PermKeyManage)).Post("/{consumerId}/keys", h.handleIssueAPIKey)
+	})
+	orgAuth.Route("/orgs/{orgId}/keys", func(r chi.Router) {
+		r.With(RequirePermission(rbac.PermKeyManage)).Post("/{keyId}/revoke", h.handleRevokeAPIKey)
+		r.With(RequirePermission(rbac.PermKeyManage)).Post("/{keyId}/rotate", h.handleRotateAPIKey)
 	})
 }
 
@@ -399,4 +404,113 @@ func sanitizeScopes(in []string) []string {
 		}
 	}
 	return out
+}
+
+func (h *ConsumerHandler) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
+	orgCtx, _ := OrgContextFromContext(r.Context())
+	principal, _ := PrincipalFromContext(r.Context())
+	keyID := chi.URLParam(r, "keyId")
+	if !uuidPattern.MatchString(keyID) {
+		WriteProblem(w, r, http.StatusBadRequest, "invalid_key_id", "Invalid Key ID", "Key ID must be a valid UUID.")
+		return
+	}
+
+	var meta APIKeyMetadata
+	err := h.Store.Pool().QueryRow(r.Context(), `
+		UPDATE api_keys
+		SET revoked_at = COALESCE(revoked_at, NOW())
+		WHERE org_id = $1 AND id = $2
+		RETURNING id, consumer_id, key_prefix, label, scopes, expires_at, revoked_at, created_at
+	`, orgCtx.OrgID, keyID).Scan(
+		&meta.ID, &meta.ConsumerID, &meta.KeyPrefix, &meta.Label, &meta.Scopes, &meta.ExpiresAt, &meta.RevokedAt, &meta.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		WriteProblem(w, r, http.StatusNotFound, "not_found", "Not Found", "API key not found.")
+		return
+	}
+	if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not revoke API key.")
+		return
+	}
+	_ = bumpDraftRevision(r.Context(), h.Store, orgCtx.OrgID, principal.UserID)
+	if h.OnKeyChanged != nil {
+		h.OnKeyChanged(r, orgCtx.OrgID)
+	}
+	WriteJSON(w, http.StatusOK, meta)
+}
+
+func (h *ConsumerHandler) handleRotateAPIKey(w http.ResponseWriter, r *http.Request) {
+	orgCtx, _ := OrgContextFromContext(r.Context())
+	principal, _ := PrincipalFromContext(r.Context())
+	keyID := chi.URLParam(r, "keyId")
+	if !uuidPattern.MatchString(keyID) {
+		WriteProblem(w, r, http.StatusBadRequest, "invalid_key_id", "Invalid Key ID", "Key ID must be a valid UUID.")
+		return
+	}
+
+	tx, err := h.Store.Pool().Begin(r.Context())
+	if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not start rotation transaction.")
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(r.Context())
+		}
+	}()
+
+	var consumerID, label string
+	var scopes []string
+	var expiresAt *time.Time
+	err = tx.QueryRow(r.Context(), `
+		UPDATE api_keys
+		SET revoked_at = NOW()
+		WHERE org_id = $1 AND id = $2 AND revoked_at IS NULL
+		RETURNING consumer_id, label, scopes, expires_at
+	`, orgCtx.OrgID, keyID).Scan(&consumerID, &label, &scopes, &expiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		WriteProblem(w, r, http.StatusNotFound, "not_found", "Not Found", "Active API key not found.")
+		return
+	}
+	if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not revoke previous API key.")
+		return
+	}
+
+	issued, err := apikey.Generate(h.KeySecret)
+	if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Key Generation Failed", "Could not generate replacement API key.")
+		return
+	}
+
+	var meta APIKeyMetadata
+	if err := tx.QueryRow(r.Context(), `
+		INSERT INTO api_keys (org_id, consumer_id, key_prefix, key_hash, label, scopes, expires_at, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING id, consumer_id, key_prefix, label, scopes, expires_at, revoked_at, created_at
+	`, orgCtx.OrgID, consumerID, issued.Prefix, issued.Hash, label, scopes, expiresAt, principal.UserID).Scan(
+		&meta.ID, &meta.ConsumerID, &meta.KeyPrefix, &meta.Label, &meta.Scopes, &meta.ExpiresAt, &meta.RevokedAt, &meta.CreatedAt,
+	); err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not persist replacement API key.")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not commit key rotation.")
+		return
+	}
+	committed = true
+
+	_ = bumpDraftRevision(r.Context(), h.Store, orgCtx.OrgID, principal.UserID)
+	if h.OnKeyChanged != nil {
+		h.OnKeyChanged(r, orgCtx.OrgID)
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	WriteJSON(w, http.StatusCreated, map[string]any{
+		"revoked_key_id": keyID,
+		"replacement": IssuedAPIKeyResponse{
+			APIKeyMetadata: meta,
+			APIKey:         issued.Plaintext,
+		},
+	})
 }

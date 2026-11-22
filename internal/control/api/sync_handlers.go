@@ -103,6 +103,7 @@ func (h *SyncHandler) handleGetActiveSnapshot(w http.ResponseWriter, r *http.Req
 
 	var latestPublished time.Time
 	var totalActivationRev int
+	activeOrgs := make([]string, 0)
 	for rows.Next() {
 		var orgID string
 		var version int
@@ -120,7 +121,7 @@ func (h *SyncHandler) handleGetActiveSnapshot(w http.ResponseWriter, r *http.Req
 		}
 		merged.Pools = append(merged.Pools, one.Pools...)
 		merged.Routes = append(merged.Routes, one.Routes...)
-		merged.Consumers = append(merged.Consumers, one.Consumers...)
+		activeOrgs = append(activeOrgs, orgID)
 		totalActivationRev += actRev
 		if orgFilter != "" {
 			merged.Version = version
@@ -134,6 +135,17 @@ func (h *SyncHandler) handleGetActiveSnapshot(w http.ResponseWriter, r *http.Req
 	if err := rows.Err(); err != nil {
 		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Error reading active snapshots.")
 		return
+	}
+
+	// Overlay live active (non-revoked) consumer keys for all active organizations so
+	// revocations and rotations propagate promptly across gateway replicas.
+	if len(activeOrgs) > 0 {
+		liveConsumers, err := h.loadLiveConsumers(r, activeOrgs)
+		if err != nil {
+			WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not load active consumer credentials.")
+			return
+		}
+		merged.Consumers = liveConsumers
 	}
 
 	sort.Slice(merged.Pools, func(i, j int) bool { return merged.Pools[i].ID < merged.Pools[j].ID })
@@ -164,4 +176,55 @@ func (h *SyncHandler) handleGetActiveSnapshot(w http.ResponseWriter, r *http.Req
 		return
 	}
 	WriteJSON(w, http.StatusOK, merged)
+}
+
+func (h *SyncHandler) loadLiveConsumers(r *http.Request, orgIDs []string) ([]snapshot.Consumer, error) {
+	cRows, err := h.Store.Pool().Query(r.Context(), `
+		SELECT id, name, status FROM consumers WHERE org_id = ANY($1::UUID[])
+	`, orgIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer cRows.Close()
+
+	consumers := make([]snapshot.Consumer, 0)
+	idxMap := make(map[string]int)
+	for cRows.Next() {
+		var c snapshot.Consumer
+		if err := cRows.Scan(&c.ID, &c.Name, &c.Status); err != nil {
+			return nil, err
+		}
+		c.Keys = make([]snapshot.APIKey, 0)
+		idxMap[c.ID] = len(consumers)
+		consumers = append(consumers, c)
+	}
+	if err := cRows.Err(); err != nil {
+		return nil, err
+	}
+
+	kRows, err := h.Store.Pool().Query(r.Context(), `
+		SELECT id, consumer_id, key_prefix, key_hash, scopes, expires_at
+		FROM api_keys
+		WHERE org_id = ANY($1::UUID[]) AND revoked_at IS NULL
+	`, orgIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer kRows.Close()
+
+	for kRows.Next() {
+		var k snapshot.APIKey
+		var cid string
+		if err := kRows.Scan(&k.ID, &cid, &k.KeyPrefix, &k.KeyHash, &k.Scopes, &k.ExpiresAt); err != nil {
+			return nil, err
+		}
+		sort.Strings(k.Scopes)
+		if idx, ok := idxMap[cid]; ok {
+			consumers[idx].Keys = append(consumers[idx].Keys, k)
+		}
+	}
+	for i := range consumers {
+		sort.Slice(consumers[i].Keys, func(a, b int) bool { return consumers[i].Keys[a].ID < consumers[i].Keys[b].ID })
+	}
+	return consumers, kRows.Err()
 }
