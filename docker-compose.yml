@@ -79,6 +79,7 @@ services:
       SESSION_SECRET: ${SESSION_SECRET:-dev-only-session-secret-change-me-32chars-minimum}
       GATEWAY_SYNC_TOKEN: ${GATEWAY_SYNC_TOKEN:-dev-only-gateway-sync-token-123456}
       ALLOW_MOCK_UPSTREAMS: ${ALLOW_MOCK_UPSTREAMS:-true}
+      TRACE_VIEWER_BASE_URL: ${TRACE_VIEWER_BASE_URL:-}
     ports:
       - "127.0.0.1:${CONTROL_PLANE_PORT:-18080}:8080"
     healthcheck:
@@ -109,6 +110,7 @@ services:
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-gatewayforge_local_redis_pw}
       ALLOW_MOCK_UPSTREAMS: ${ALLOW_MOCK_UPSTREAMS:-true}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-18081}:8081"
     healthcheck:
@@ -139,6 +141,7 @@ services:
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-gatewayforge_local_redis_pw}
       ALLOW_MOCK_UPSTREAMS: ${ALLOW_MOCK_UPSTREAMS:-true}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     ports:
       - "127.0.0.1:${GATEWAY_2_PORT:-18082}:8081"
     healthcheck:
@@ -168,6 +171,29 @@ services:
       timeout: 3s
       retries: 10
       start_period: 5s
+    networks:
+      - gatewayforge-internal
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["observability"]
+    restart: unless-stopped
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-19090}:9090"
+    networks:
+      - gatewayforge-internal
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.63.0
+    profiles: ["observability"]
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:${JAEGER_UI_PORT:-16686}:16686"
+      - "127.0.0.1:${JAEGER_OTLP_HTTP_PORT:-14318}:4318"
     networks:
       - gatewayforge-internal
 

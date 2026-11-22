@@ -31,11 +31,31 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	traceProv, traceErr := telemetry.InitTracing(ctx, telemetry.TracingConfig{
+		ServiceName:    "gatewayforge-gateway",
+		ServiceVersion: buildinfo.ForService("gateway").Version,
+		Environment:    string(appCfg.Env),
+		OTLPEndpoint:   os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+	})
+	if traceErr != nil {
+		logger.Warn("otel tracing init failed; continuing with no-op tracer", "error", traceErr)
+	} else {
+		defer func() {
+			shCtx, shCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer shCancel()
+			_ = traceProv.Shutdown(shCtx)
+		}()
+	}
+
 	srvCfg := gateway.DefaultServerConfig()
 	srvCfg.Addr = appCfg.Addr
 	srvCfg.ShutdownTimeout = appCfg.ShutdownTimeout
 	srvCfg.AllowMockUpstreams = appCfg.AllowMockUpstreams
 	srv := gateway.NewServer(srvCfg)
+	srv.Engine().Logger = logger
+	if traceProv != nil {
+		srv.Engine().Tracer = traceProv.Tracer()
+	}
 
 	var hints *events.HintCoalescer
 	if appCfg.RedisAddr != "" {
@@ -107,7 +127,10 @@ func main() {
 					// Drop silently under extreme saturation rather than blocking the proxy hot path.
 				}
 			})
-			instanceID, _ := os.Hostname()
+			instanceID := os.Getenv("GATEWAY_INSTANCE_ID")
+			if instanceID == "" {
+				instanceID, _ = os.Hostname()
+			}
 			if instanceID == "" {
 				instanceID = "gateway-local"
 			}
