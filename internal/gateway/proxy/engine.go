@@ -37,6 +37,8 @@ func NewEngine(holder *table.Holder, transport http.RoundTripper, pol Destinatio
 
 // ServeHTTP matches the request against the immutable snapshot and streams it to the selected upstream.
 func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r, corr := AttachCorrelation(w, r)
+
 	tbl := e.Holder.Current()
 	match := tbl.Matcher.Match(r.Host, r.Method, r.URL.Path)
 	if !match.Matched {
@@ -108,10 +110,10 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	e.proxyStreaming(w, r, upstreamURL)
+	e.proxyStreaming(w, r, upstreamURL, corr)
 }
 
-func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL) {
+func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL, corr Correlation) {
 	rp := &httputil.ReverseProxy{
 		Transport:     e.Transport,
 		FlushInterval: -1, // stream response chunks immediately without buffering
@@ -123,6 +125,7 @@ func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstream
 			pr.Out.URL.RawQuery = upstreamURL.RawQuery
 			pr.Out.Host = upstreamURL.Host
 			SanitizeOutboundHeaders(pr.In, pr.Out, e.TrustedProxies)
+			ApplyCorrelationOutbound(pr.Out, corr)
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			StripHopByHop(resp.Header)
