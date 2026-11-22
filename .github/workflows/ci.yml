@@ -91,9 +91,35 @@ jobs:
   compose:
     name: Docker Compose validation
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Validate docker-compose.yml
         run: docker compose config --quiet
+
+  security:
+    name: Security, container and secret checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify Dockerfile hardening
+        run: bash scripts/check-containers.sh
+
+      - name: Scan repository for committed secrets
+        run: bash scripts/check-secrets.sh
+
+      - name: Run adversarial security and chaos tests
+        run: go test -race -v ./tests/security/...
