@@ -20,17 +20,47 @@ import {
   RateLimitPolicyForm,
   validateRateLimitPolicyConfig,
 } from "@/components/management/ratelimit-policy-form";
+import {
+  defaultCircuitBreakerConfig,
+  defaultCorsConfig,
+  defaultRetryConfig,
+  defaultTimeoutConfig,
+  ResiliencePolicyForm,
+  validateResiliencePolicyConfig,
+} from "@/components/management/resilience-policy-form";
 import { ApiError, apiRequest } from "@/lib/api/client";
 import type { PaginatedResponse, PolicyItem, RouteItem, ServiceItem } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth-context";
 
-export type SupportedPolicyType = "api_key" | "jwt" | "rate_limit" | "quota";
+export type SupportedPolicyType =
+  | "api_key"
+  | "jwt"
+  | "rate_limit"
+  | "quota"
+  | "timeout"
+  | "retry"
+  | "circuit_breaker"
+  | "cors";
 
 export function defaultConfigForPolicyType(t: SupportedPolicyType): Record<string, unknown> {
-  if (t === "api_key") return defaultApiKeyConfig() as unknown as Record<string, unknown>;
-  if (t === "jwt") return defaultJwtConfig() as unknown as Record<string, unknown>;
-  if (t === "rate_limit") return defaultRateLimitConfig();
-  return defaultQuotaConfig();
+  switch (t) {
+    case "api_key":
+      return defaultApiKeyConfig() as unknown as Record<string, unknown>;
+    case "jwt":
+      return defaultJwtConfig() as unknown as Record<string, unknown>;
+    case "rate_limit":
+      return defaultRateLimitConfig();
+    case "quota":
+      return defaultQuotaConfig();
+    case "timeout":
+      return defaultTimeoutConfig();
+    case "retry":
+      return defaultRetryConfig();
+    case "circuit_breaker":
+      return defaultCircuitBreakerConfig();
+    case "cors":
+      return defaultCorsConfig();
+  }
 }
 
 export function PoliciesManager() {
@@ -127,8 +157,10 @@ export function PoliciesManager() {
     }
     if (policyType === "api_key" || policyType === "jwt") {
       Object.assign(errs, validateAuthPolicyConfig(policyType, config));
-    } else {
+    } else if (policyType === "rate_limit" || policyType === "quota") {
       Object.assign(errs, validateRateLimitPolicyConfig(policyType, config));
+    } else {
+      Object.assign(errs, validateResiliencePolicyConfig(policyType, config));
     }
     setFieldErrs(errs);
     if (Object.keys(errs).length > 0) return;
@@ -380,6 +412,10 @@ export function PoliciesManager() {
                 <option value="jwt">JWT Verification (jwt)</option>
                 <option value="rate_limit">Distributed Rate Limit (rate_limit)</option>
                 <option value="quota">UTC Usage Quota (quota)</option>
+                <option value="timeout">Upstream Timeout (timeout)</option>
+                <option value="retry">Idempotent Retry (retry)</option>
+                <option value="circuit_breaker">Circuit Breaker (circuit_breaker)</option>
+                <option value="cors">CORS Rules (cors)</option>
               </Select>
             </div>
           </div>
@@ -391,8 +427,15 @@ export function PoliciesManager() {
               errors={fieldErrs}
               onChange={setConfig}
             />
-          ) : (
+          ) : policyType === "rate_limit" || policyType === "quota" ? (
             <RateLimitPolicyForm
+              policyType={policyType}
+              config={config}
+              errors={fieldErrs}
+              onChange={setConfig}
+            />
+          ) : (
+            <ResiliencePolicyForm
               policyType={policyType}
               config={config}
               errors={fieldErrs}
