@@ -18,4 +18,5 @@
 | 07 — Rate limits | `phase/07-rate-limits` | 2026-11-22 08:39 | 2026-11-22 08:52 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/7 | `2c1d1378fe20d37d76ae0077a901a84c4c27cd53` | Merged |
 | 08 — Resilience | `phase/08-resilience` | 2026-11-22 08:52 | 2026-11-22 09:08 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/8 | `351db49c4c232caca36645290d92e6590e2c17c8` | Merged |
 | 09 — Observability | `phase/09-observability` | 2026-11-22 09:08 | 2026-11-22 09:25 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/9 | `90b4b0e7aabbd1fcfd626228fe7d71b5408e37c0` | Merged |
-| 10 — Dashboard UI | `phase/10-dashboard` | 2026-11-22 09:26 | TBD | In progress | TBD | TBD | In progress |
+| 10 — Dashboard UI | `phase/10-dashboard` | 2026-11-22 09:26 | 2026-11-22 12:57 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/10 | `ec86adfeb8e65318e222f780d3fbbb2024c31d2b` | Merged |
+| 11 — Management UI | `phase/11-management-ui` | 2026-11-22 12:57 | TBD | In progress | TBD | TBD | In progress |
