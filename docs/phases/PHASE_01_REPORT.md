@@ -17,7 +17,8 @@
 8. `e5a2d2ed6199bc6fc54df286fc06ba35aaae844d` — `phase 01: start Redis in Compose`
 9. `326891e2c012e3e5d7473fdd95cf71210b42ccf7` — `phase 01: add deterministic mock upstream`
 10. `10200b8588b4b34e553debd9eec93c5403446800` — `phase 01: standardize tooling and Makefile`
-11. *(HEAD commit of this PR)* — `phase 01: add baseline GitHub CI`
+11. `6a0dcac7261bf71fe2f2ea5a01dfa0c1b6ebc125` — `phase 01: add baseline GitHub CI`
+12. *(CI fix commit)* — `phase 01: pin golangci-lint v2.12.2 in CI` (fixed `golangci-lint-action` rejecting `version: v2` without minor/patch version)
 
 ## Verification Evidence
 
