@@ -12,10 +12,15 @@ import (
 	"github.com/YASSERRMD/GatewayForge/internal/shared/config"
 )
 
-type stubHasher struct{}
-
-func (stubHasher) Hash(pw string) (string, error)    { return "stub$" + pw, nil }
-func (stubHasher) Verify(pw, h string) (bool, error) { return h == "stub$"+pw, nil }
+func newTestArgonHasher() *auth.Argon2idHasher {
+	return auth.NewArgon2idHasher(auth.Argon2idParams{
+		MemoryKiB:   16 * 1024,
+		Iterations:  1,
+		Parallelism: 1,
+		SaltLength:  16,
+		KeyLength:   32,
+	})
+}
 
 func TestFirstAdminBootstrapConcurrencyAndReplay(t *testing.T) {
 	pool := openIntegrationDB(t)
@@ -24,15 +29,17 @@ func TestFirstAdminBootstrapConcurrencyAndReplay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
+	hasher := newTestArgonHasher()
+
 	// Production mode MUST refuse bootstrap.
-	prodSvc := auth.NewBootstrapService(pool, config.EnvProduction, stubHasher{})
+	prodSvc := auth.NewBootstrapService(pool, config.EnvProduction, hasher)
 	if _, err := prodSvc.Bootstrap(ctx, auth.BootstrapInput{
 		Email: "owner@prod.test", DisplayName: "Owner", Password: "StrongPassword!123", OrgSlug: "prod-org", OrgName: "Prod Org",
 	}); !errors.Is(err, auth.ErrBootstrapDisabled) {
 		t.Fatalf("expected ErrBootstrapDisabled in production, got: %v", err)
 	}
 
-	svc := auth.NewBootstrapService(pool, config.EnvTest, stubHasher{})
+	svc := auth.NewBootstrapService(pool, config.EnvTest, hasher)
 
 	// Weak password MUST fail.
 	if _, err := svc.Bootstrap(ctx, auth.BootstrapInput{
