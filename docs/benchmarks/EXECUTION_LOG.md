@@ -20,4 +20,5 @@
 | 09 — Observability | `phase/09-observability` | 2026-11-22 09:08 | 2026-11-22 09:25 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/9 | `90b4b0e7aabbd1fcfd626228fe7d71b5408e37c0` | Merged |
 | 10 — Dashboard UI | `phase/10-dashboard` | 2026-11-22 09:26 | 2026-11-22 12:57 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/10 | `ec86adfeb8e65318e222f780d3fbbb2024c31d2b` | Merged |
 | 11 — Management UI | `phase/11-management-ui` | 2026-11-22 12:57 | 2026-11-22 13:21 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/11 | `036b2c0727813346dbc93be357a68ad38ab407de` | Merged |
-| 12 — Console & OpenAPI | `phase/12-api-console-import` | 2026-11-22 13:22 | TBD | In progress | TBD | TBD | In progress |
+| 12 — Console & OpenAPI | `phase/12-api-console-import` | 2026-11-22 13:22 | 2026-11-22 14:29 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/12 | `052254beb59781533c11d63d02ec50d5d792b09e` | Merged |
+| 13 — Release Workflow | `phase/13-release-workflow` | 2026-11-22 14:30 | TBD | In progress | TBD | TBD | In progress |
