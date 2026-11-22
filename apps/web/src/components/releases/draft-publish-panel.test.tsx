@@ -90,4 +90,45 @@ describe("DraftPublishPanel", () => {
     await waitFor(() => expect(screen.getByText(/cannot publish or activate releases/i)).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: /review & publish/i })).not.toBeInTheDocument();
   });
+
+  it("blocks publication and surfaces actionable validation errors while preserving LKG", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          draft_revision: 7,
+          validation: {
+            valid: false,
+            draft_revision: 7,
+            errors: [
+              {
+                code: "invalid_rate_limit_policy",
+                severity: "error",
+                resource: "policy:unsafe-rl",
+                message: "critical security_class cannot use fail_open",
+              },
+            ],
+            warnings: [],
+          },
+          preview: { checksum: "deadbeef", routes: [], upstreams: {} },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+    );
+
+    render(
+      <AuthProvider
+        initialState={{
+          status: "authenticated",
+          user: { id: "u1", email: "admin@acme.test", display_name: "Admin" },
+          memberships: [{ org_id: "o1", org_slug: "acme", org_name: "Acme", role: "owner" }],
+        }}
+      >
+        <DraftPublishPanel />
+      </AuthProvider>
+    );
+
+    await waitFor(() => expect(screen.getByText(/Publication Blocked \(Last-Known-Good Preserved\)/i)).toBeInTheDocument());
+    expect(screen.getByText(/policy:unsafe-rl/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /review & publish/i })).toBeDisabled();
+  });
 });
