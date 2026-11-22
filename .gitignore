@@ -12,6 +12,7 @@ coverage/
 playwright-report/
 test-results/
 apps/web/out/
+*.tsbuildinfo
 
 # Go binaries / coverage
 bin/

@@ -60,6 +60,87 @@ services:
     networks:
       - gatewayforge-internal
 
+  control-plane:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.control-plane
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      GATEWAYFORGE_ENV: ${GATEWAYFORGE_ENV:-development}
+      CONTROL_PLANE_ADDR: ":8080"
+      DATABASE_URL: postgres://${POSTGRES_USER:-gatewayforge}:${POSTGRES_PASSWORD:-gatewayforge_local_dev_pw}@postgres:5432/${POSTGRES_DB:-gatewayforge}?sslmode=disable
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-gatewayforge_local_redis_pw}
+      SESSION_SECRET: ${SESSION_SECRET:-dev-only-session-secret-change-me-32chars-minimum}
+      GATEWAY_SYNC_TOKEN: ${GATEWAY_SYNC_TOKEN:-dev-only-gateway-sync-token-123456}
+      ALLOW_MOCK_UPSTREAMS: ${ALLOW_MOCK_UPSTREAMS:-true}
+    ports:
+      - "127.0.0.1:${CONTROL_PLANE_PORT:-18080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health/ready >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    networks:
+      - gatewayforge-internal
+
+  gateway:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.gateway
+    restart: unless-stopped
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      GATEWAYFORGE_ENV: ${GATEWAYFORGE_ENV:-development}
+      GATEWAY_INSTANCE_ID: "gateway-1"
+      GATEWAY_ADDR: ":8081"
+      CONTROL_PLANE_URL: http://control-plane:8080
+      GATEWAY_SYNC_TOKEN: ${GATEWAY_SYNC_TOKEN:-dev-only-gateway-sync-token-123456}
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-gatewayforge_local_redis_pw}
+      ALLOW_MOCK_UPSTREAMS: ${ALLOW_MOCK_UPSTREAMS:-true}
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-18081}:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/health/ready >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    networks:
+      - gatewayforge-internal
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.web
+    restart: unless-stopped
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_CONTROL_PLANE_URL: http://localhost:${CONTROL_PLANE_PORT:-18080}
+    ports:
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - gatewayforge-internal
+
 volumes:
   gatewayforge_pgdata:
 
