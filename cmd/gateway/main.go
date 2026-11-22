@@ -5,8 +5,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/YASSERRMD/GatewayForge/internal/gateway"
+	"github.com/YASSERRMD/GatewayForge/internal/gateway/ratelimit"
 	syncer "github.com/YASSERRMD/GatewayForge/internal/gateway/sync"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/buildinfo"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/cache"
@@ -37,12 +39,31 @@ func main() {
 	if appCfg.RedisAddr != "" {
 		rc, rErr := cache.Connect(ctx, appCfg.RedisAddr, appCfg.RedisPassword)
 		if rErr != nil {
-			logger.Warn("redis unavailable at gateway startup; falling back to periodic snapshot polling", "error", rErr)
+			logger.Warn("redis unavailable at gateway startup; falling back to periodic snapshot polling and fail-mode rate limiting", "error", rErr)
+			srv.AttachRateLimiter(ratelimit.NewEnforcer(
+				ratelimit.NewRedisLimiter(nil, 250*time.Millisecond),
+				nil,
+				ratelimit.NewRedisQuotaCounter(nil, 250*time.Millisecond),
+				nil,
+			))
 		} else {
 			defer func() { _ = rc.Close() }()
 			hints = events.NewHintCoalescer()
 			go events.Subscribe(ctx, rc, events.ChannelConfigChanged, hints, logger)
+			srv.AttachRateLimiter(ratelimit.NewEnforcer(
+				ratelimit.NewRedisLimiter(rc, 250*time.Millisecond),
+				nil,
+				ratelimit.NewRedisQuotaCounter(rc, 250*time.Millisecond),
+				nil,
+			))
 		}
+	} else {
+		srv.AttachRateLimiter(ratelimit.NewEnforcer(
+			nil,
+			ratelimit.NewLocalLimiter(nil, 10000),
+			nil,
+			ratelimit.NewLocalQuotaCounter(nil, 10000),
+		))
 	}
 
 	if appCfg.ControlPlaneURL != "" && appCfg.GatewaySyncToken != "" {

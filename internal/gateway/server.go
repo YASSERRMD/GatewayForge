@@ -14,6 +14,7 @@ import (
 
 	gwauth "github.com/YASSERRMD/GatewayForge/internal/gateway/auth"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/proxy"
+	"github.com/YASSERRMD/GatewayForge/internal/gateway/ratelimit"
 	syncer "github.com/YASSERRMD/GatewayForge/internal/gateway/sync"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/health"
@@ -61,6 +62,7 @@ type Server struct {
 	holder     *table.Holder
 	transport  *http.Transport
 	engine     *proxy.Engine
+	rlMetrics  *ratelimit.Telemetry
 	mux        *http.ServeMux
 
 	statusMu sync.RWMutex
@@ -117,9 +119,11 @@ func NewServer(cfg ServerConfig) *Server {
 		holder:     holder,
 		transport:  tr,
 		engine:     eng,
+		rlMetrics:  ratelimit.NewTelemetry(ratelimit.DefaultMaxMetricRoutes),
 		mux:        mux,
 	}
 	mux.HandleFunc("/health/config", s.handleConfigStatus)
+	mux.HandleFunc("/health/ratelimit", s.handleRateLimitStatus)
 	mux.Handle("/", eng)
 	return s
 }
@@ -129,6 +133,38 @@ func (s *Server) AttachSyncStatus(fn func() syncer.SyncStatus) {
 	s.statusMu.Lock()
 	defer s.statusMu.Unlock()
 	s.statusFn = fn
+}
+
+// AttachRateLimiter binds a distributed or local rate-limit/quota enforcer to the proxy engine
+// and wires its bounded-cardinality telemetry recorder.
+func (s *Server) AttachRateLimiter(enforcer *ratelimit.Enforcer) {
+	if enforcer != nil && enforcer.OnEvent == nil {
+		enforcer.OnEvent = s.rlMetrics.Record
+	}
+	s.engine.RateLimit = enforcer
+}
+
+// RateLimitTelemetry returns the bounded-cardinality limiter telemetry collector.
+func (s *Server) RateLimitTelemetry() *ratelimit.Telemetry {
+	return s.rlMetrics
+}
+
+func (s *Server) handleRateLimitStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if r.URL.Query().Get("format") == "prometheus" {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(s.rlMetrics.FormatPrometheus()))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(s.rlMetrics.Snapshot())
 }
 
 func (s *Server) handleConfigStatus(w http.ResponseWriter, r *http.Request) {

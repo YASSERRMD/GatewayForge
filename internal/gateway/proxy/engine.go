@@ -11,6 +11,7 @@ import (
 	gwauth "github.com/YASSERRMD/GatewayForge/internal/gateway/auth"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/balancer"
 	gwcors "github.com/YASSERRMD/GatewayForge/internal/gateway/cors"
+	"github.com/YASSERRMD/GatewayForge/internal/gateway/ratelimit"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
 )
 
@@ -23,6 +24,7 @@ type Engine struct {
 	Limits         ResourceLimits
 	Selector       balancer.Selector
 	Auth           *gwauth.Enforcer
+	RateLimit      *ratelimit.Enforcer
 }
 
 // NewEngine creates a streaming reverse-proxy Engine backed by holder.
@@ -79,7 +81,7 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Enforce route/service/org consumer authentication & scopes before proxying.
-	_, stripHeaders, authErr := e.Auth.Enforce(r, tbl, match.Route)
+	identity, stripHeaders, authErr := e.Auth.Enforce(r, tbl, match.Route)
 	if authErr != nil {
 		if errors.Is(authErr, gwauth.ErrForbidden) {
 			WriteGatewayError(w, r, http.StatusForbidden, CodeForbidden, "insufficient scope for this route")
@@ -87,6 +89,25 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		WriteGatewayError(w, r, http.StatusUnauthorized, CodeUnauthorized, "authentication required")
 		return
+	}
+
+	// Enforce distributed rate limits and UTC quotas after auth so consumer identity is known.
+	if e.RateLimit != nil {
+		rlRes := e.RateLimit.Enforce(r.Context(), r, tbl.OrgID, match.Route, identity.ConsumerID)
+		if rlRes.EmitHeaders {
+			ratelimit.WriteHeaders(w.Header(), rlRes.Decision)
+		}
+		if rlRes.DegradedOpen {
+			w.Header().Set("X-RateLimit-Mode", "fail-open-degraded")
+		}
+		if !rlRes.Allowed {
+			if rlRes.DeniedBy == "backend_unavailable" {
+				WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeServiceOverloaded, "rate limit backend unavailable")
+				return
+			}
+			WriteGatewayError(w, r, http.StatusTooManyRequests, CodeRateLimited, "rate limit or quota exceeded")
+			return
+		}
 	}
 
 	pool, ok := tbl.Pools[match.Route.UpstreamPoolID]
