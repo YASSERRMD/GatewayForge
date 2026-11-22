@@ -1,0 +1,255 @@
+openapi: 3.1.0
+info:
+  title: GatewayForge Control Plane API
+  version: 0.3.0
+  description: |
+    Self-hosted multi-tenant API gateway control plane contract.
+    All tenant-scoped endpoints live under `/api/v1/orgs/{orgId}` and enforce explicit membership, RBAC, and CSRF protection on state-changing requests.
+servers:
+  - url: http://localhost:18080
+    description: Local Docker Compose control plane
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: gwf_session
+    csrfHeader:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code: { type: string }
+        request_id: { type: string }
+        errors:
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: { type: string }
+              message: { type: string }
+    HealthResponse:
+      type: object
+      required: [status, service, version, timestamp]
+      properties:
+        status: { type: string, enum: [ok, ready, not_ready, draining] }
+        service: { type: string }
+        version: { type: string }
+        timestamp: { type: string, format: date-time }
+    Organization:
+      type: object
+      required: [id, slug, display_name, enabled, revision]
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string }
+        display_name: { type: string }
+        enabled: { type: boolean }
+        revision: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    MemberView:
+      type: object
+      required: [membership_id, user_id, email, display_name, role]
+      properties:
+        membership_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        display_name: { type: string }
+        role: { type: string, enum: [owner, admin, developer, viewer] }
+        is_active: { type: boolean }
+    AuditEvent:
+      type: object
+      required: [id, action, target_type, request_id, created_at]
+      properties:
+        id: { type: integer }
+        org_id: { type: string, format: uuid }
+        actor_email: { type: string }
+        action: { type: string }
+        target_type: { type: string }
+        target_id: { type: string }
+        request_id: { type: string }
+        before_redacted: { type: object }
+        after_redacted: { type: object }
+        created_at: { type: string, format: date-time }
+paths:
+  /health/live:
+    get:
+      summary: Control-plane liveness probe
+      responses:
+        "200":
+          description: Process is live
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /health/ready:
+    get:
+      summary: Control-plane readiness probe
+      responses:
+        "200":
+          description: Service and dependencies are ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Dependency unavailable or draining
+  /api/v1/meta:
+    get:
+      summary: Control-plane API metadata
+      responses:
+        "200":
+          description: API version and correlation ID
+  /api/v1/auth/bootstrap:
+    post:
+      summary: One-time dev/test initial administrator provisioning
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, display_name, password, org_slug, org_name]
+              properties:
+                email: { type: string, format: email }
+                display_name: { type: string }
+                password: { type: string, minLength: 12 }
+                org_slug: { type: string }
+                org_name: { type: string }
+      responses:
+        "201": { description: Initial owner and organization provisioned }
+        "403": { description: Disabled in production }
+        "409": { description: Already bootstrapped }
+  /api/v1/auth/login:
+    post:
+      summary: Authenticate with email and password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200": { description: Session cookie and CSRF token issued }
+        "401": { description: Invalid credentials }
+  /api/v1/auth/logout:
+    post:
+      summary: Revoke current session server-side
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "200": { description: Session revoked }
+        "401": { description: Unauthenticated }
+        "403": { description: Invalid CSRF token }
+  /api/v1/auth/me:
+    get:
+      summary: Current authenticated user profile and organization memberships
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: User profile and explicit memberships }
+        "401": { description: Unauthenticated }
+  /api/v1/orgs:
+    get:
+      summary: List organizations accessible to the current user
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Paginated organizations list }
+    post:
+      summary: Create a new organization with caller as owner
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "201":
+          description: Organization created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+  /api/v1/orgs/{orgId}:
+    get:
+      summary: Get organization details
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Organization object with revision ETag
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+    patch:
+      summary: Update organization settings with optimistic concurrency
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "200": { description: Organization updated }
+        "409": { description: Stale revision conflict }
+  /api/v1/orgs/{orgId}/members:
+    get:
+      summary: List organization members
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Paginated members list }
+    post:
+      summary: Add or invite member to organization
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "201": { description: Membership created }
+        "403": { description: Insufficient permissions or owner grant forbidden }
+  /api/v1/orgs/{orgId}/members/{userId}:
+    patch:
+      summary: Change member role with last-owner protection
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "200": { description: Role updated }
+        "409": { description: Last owner cannot be demoted }
+    delete:
+      summary: Revoke organization membership with last-owner protection
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "204": { description: Membership revoked }
+        "409": { description: Last owner cannot be removed }
+  /api/v1/orgs/{orgId}/audit-events:
+    get:
+      summary: List append-only redacted audit events with filters
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Paginated audit events }
+  /api/v1/orgs/{orgId}/audit-events/{eventId}:
+    get:
+      summary: Get single immutable audit event detail
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Audit event detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditEvent"
