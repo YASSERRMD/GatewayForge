@@ -3,6 +3,8 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/YASSERRMD/GatewayForge/internal/shared/redact"
 )
 
 const (
@@ -45,7 +47,7 @@ func WriteGatewayError(w http.ResponseWriter, r *http.Request, status int, code,
 	_ = json.NewEncoder(w).Encode(GatewayError{
 		Status:    status,
 		Code:      code,
-		Message:   message,
+		Message:   redact.String(message),
 		RequestID: reqID,
 		TraceID:   corr.TraceID,
 	})
