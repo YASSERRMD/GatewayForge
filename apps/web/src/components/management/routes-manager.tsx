@@ -3,6 +3,7 @@
 import * as React from "react";
 import { AlertTriangle, Download, FileUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ConflictResolutionBanner } from "@/components/ui/conflict-banner";
 import { Dialog } from "@/components/ui/dialog";
 import { FieldError, Input, Label, Select } from "@/components/ui/input";
 import { ErrorBanner } from "@/components/ui/states";
@@ -278,10 +279,11 @@ export function RoutesManager() {
       >
         <form onSubmit={handleSave} noValidate className="space-y-4">
           {conflictErr && (
-            <ErrorBanner
-              title="Route Conflict (409)"
+            <ConflictResolutionBanner
+              resourceLabel={editing ? `Route "${editing.name}"` : "Route"}
+              staleRevision={editing?.revision}
               message={conflictErr}
-              onRetry={() => {
+              onReloadLatest={() => {
                 setEditorOpen(false);
                 setReloadKey((k) => k + 1);
               }}

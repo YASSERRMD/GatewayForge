@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { Button } from "@/components/ui/button";
+import { ConflictResolutionBanner } from "@/components/ui/conflict-banner";
 import { Dialog } from "@/components/ui/dialog";
 import { FieldError, Input, Label, Textarea } from "@/components/ui/input";
 import { ErrorBanner } from "@/components/ui/states";
@@ -164,12 +165,31 @@ export function ServicesManager() {
       >
         <form onSubmit={handleSave} noValidate className="space-y-4">
           {conflictErr && (
-            <ErrorBanner
-              title="Revision Conflict (409)"
+            <ConflictResolutionBanner
+              resourceLabel={editing ? `Service "${editing.name}"` : "Service"}
+              staleRevision={editing?.revision}
               message={conflictErr}
-              onRetry={() => {
-                setEditorOpen(false);
-                setReloadKey((k) => k + 1);
+              onReloadLatest={() => {
+                if (!editing || !activeOrgId) {
+                  setEditorOpen(false);
+                  setReloadKey((k) => k + 1);
+                  return;
+                }
+                void apiRequest<ServiceItem>(`/api/v1/orgs/${activeOrgId}/services/${editing.id}`, {
+                  onUnauthorized: () => clearSession(true),
+                })
+                  .then((latest) => {
+                    setEditing(latest);
+                    setName(latest.name);
+                    setDescription(latest.description);
+                    setEnabled(latest.enabled);
+                    setConflictErr(null);
+                    setReloadKey((k) => k + 1);
+                  })
+                  .catch(() => {
+                    setEditorOpen(false);
+                    setReloadKey((k) => k + 1);
+                  });
               }}
             />
           )}
