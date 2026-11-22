@@ -26,6 +26,7 @@ func (h *OpenAPIHandler) MountOpenAPIRoutes(v1 chi.Router) {
 	orgAuth := v1.With(RequireAuth(h.Sessions), RequireOrgContext(h.Sessions), AuditMutationsMiddleware(h.Audit))
 	orgAuth.Route("/orgs/{orgId}/openapi", func(r chi.Router) {
 		r.With(RequirePermission(rbac.PermConfigWrite)).Post("/preview", h.handlePreview)
+		r.With(RequirePermission(rbac.PermConfigWrite)).Post("/import", h.handleImport)
 	})
 }
 
@@ -153,4 +154,194 @@ func (h *OpenAPIHandler) handlePreview(w http.ResponseWriter, r *http.Request) {
 		Routes:            annotated,
 		Warnings:          plan.Warnings,
 	})
+}
+
+type importRouteDecision struct {
+	Key             string   `json:"key"`
+	Action          string   `json:"action"` // create | skip | rename | overwrite
+	Name            string   `json:"name"`
+	Host            string   `json:"host"`
+	PathPrefix      string   `json:"path_prefix"`
+	Methods         []string `json:"methods"`
+	StripPrefix     bool     `json:"strip_prefix"`
+	Priority        int      `json:"priority"`
+	ExistingRouteID string   `json:"existing_route_id"`
+}
+
+type openAPIImportRequest struct {
+	Service        openapi.ProposedService `json:"service"`
+	UpstreamPoolID string                  `json:"upstream_pool_id"`
+	Routes         []importRouteDecision   `json:"routes"`
+}
+
+// OpenAPIImportResult summarizes a transactional OpenAPI draft import commit.
+type OpenAPIImportResult struct {
+	ServiceID      string `json:"service_id"`
+	ServiceCreated bool   `json:"service_created"`
+	CreatedRoutes  int    `json:"created_routes"`
+	UpdatedRoutes  int    `json:"updated_routes"`
+	SkippedRoutes  int    `json:"skipped_routes"`
+}
+
+func (h *OpenAPIHandler) handleImport(w http.ResponseWriter, r *http.Request) {
+	orgCtx, _ := OrgContextFromContext(r.Context())
+	principal, _ := PrincipalFromContext(r.Context())
+
+	var in openAPIImportRequest
+	if !DecodeStrictJSON(w, r, 512<<10, &in) {
+		return
+	}
+
+	if !uuidPattern.MatchString(in.UpstreamPoolID) {
+		WriteProblem(w, r, http.StatusUnprocessableEntity, "invalid_pool_id", "Invalid Upstream Pool", "upstream_pool_id must be a valid UUID.")
+		return
+	}
+	slug := openapi.Slugify(in.Service.Slug)
+	svcName := strings.TrimSpace(in.Service.Name)
+	if svcName == "" || len(svcName) > 120 {
+		WriteProblem(w, r, http.StatusUnprocessableEntity, "invalid_service", "Invalid Service", "service.name must be 1..120 characters.")
+		return
+	}
+
+	tx, err := h.Store.Pool().Begin(r.Context())
+	if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not start import transaction.")
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(r.Context())
+		}
+	}()
+
+	var envID string
+	if err := tx.QueryRow(r.Context(), `
+		SELECT env_id FROM upstream_pools WHERE org_id = $1 AND id = $2
+	`, orgCtx.OrgID, in.UpstreamPoolID).Scan(&envID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			WriteProblem(w, r, http.StatusUnprocessableEntity, "invalid_pool", "Invalid Upstream Pool", "Upstream pool not found in this organization.")
+			return
+		}
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not verify upstream pool.")
+		return
+	}
+
+	var serviceID string
+	serviceCreated := false
+	err = tx.QueryRow(r.Context(), `
+		SELECT id FROM services WHERE org_id = $1 AND slug = $2 AND deleted_at IS NULL LIMIT 1
+	`, orgCtx.OrgID, slug).Scan(&serviceID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(r.Context(), `
+			INSERT INTO services (org_id, env_id, slug, name, description, enabled)
+			VALUES ($1, $2, $3, $4, $5, TRUE)
+			RETURNING id
+		`, orgCtx.OrgID, envID, slug, svcName, strings.TrimSpace(in.Service.Description)).Scan(&serviceID)
+		if err != nil {
+			WriteProblem(w, r, http.StatusConflict, "service_conflict", "Service Creation Failed", "Could not create imported service in transaction.")
+			return
+		}
+		serviceCreated = true
+	} else if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not query existing service.")
+		return
+	}
+
+	var res OpenAPIImportResult
+	res.ServiceID = serviceID
+	res.ServiceCreated = serviceCreated
+
+	for _, rd := range in.Routes {
+		action := strings.ToLower(strings.TrimSpace(rd.Action))
+		if action == "" {
+			action = "skip"
+		}
+		if action == "skip" {
+			res.SkippedRoutes++
+			continue
+		}
+
+		name := strings.TrimSpace(rd.Name)
+		host := strings.ToLower(strings.TrimSpace(rd.Host))
+		pathPrefix := strings.TrimSpace(rd.PathPrefix)
+		methods, methodErrs := normalizeMethods(rd.Methods)
+		if len(methodErrs) > 0 || len(name) < 1 || len(name) > 120 ||
+			len(host) < 1 || len(host) > 253 || strings.ContainsAny(host, " /:@\t\r\n") ||
+			!strings.HasPrefix(pathPrefix, "/") || strings.Contains(pathPrefix, "..") ||
+			rd.Priority < 0 || rd.Priority > 10000 {
+			WriteProblem(w, r, http.StatusUnprocessableEntity, "invalid_import_route", "Invalid Route In Import",
+				"Route "+name+" failed validation; entire import transaction rolled back.")
+			return
+		}
+
+		switch action {
+		case "create", "rename":
+			var newID string
+			err := tx.QueryRow(r.Context(), `
+				INSERT INTO routes (org_id, env_id, service_id, upstream_pool_id, name, host, path_prefix, methods, strip_prefix, priority, enabled)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, TRUE)
+				RETURNING id
+			`, orgCtx.OrgID, envID, serviceID, in.UpstreamPoolID, name, host, pathPrefix, methods, rd.StripPrefix, rd.Priority).Scan(&newID)
+			if err != nil {
+				WriteProblem(w, r, http.StatusConflict, "import_route_conflict", "Route Import Conflict",
+					"Route "+name+" could not be created (duplicate or conflict); entire import rolled back.")
+				return
+			}
+			res.CreatedRoutes++
+
+		case "overwrite":
+			if !uuidPattern.MatchString(rd.ExistingRouteID) {
+				WriteProblem(w, r, http.StatusUnprocessableEntity, "invalid_existing_route", "Invalid Overwrite Target",
+					"Overwrite action requires valid existing_route_id; entire import rolled back.")
+				return
+			}
+			tag, err := tx.Exec(r.Context(), `
+				UPDATE routes
+				SET service_id = $3, upstream_pool_id = $4, name = $5, host = $6, path_prefix = $7,
+				    methods = $8, strip_prefix = $9, priority = $10, revision = revision + 1, updated_at = NOW()
+				WHERE org_id = $1 AND id = $2
+			`, orgCtx.OrgID, rd.ExistingRouteID, serviceID, in.UpstreamPoolID, name, host, pathPrefix, methods, rd.StripPrefix, rd.Priority)
+			if err != nil || tag.RowsAffected() == 0 {
+				WriteProblem(w, r, http.StatusConflict, "import_overwrite_failed", "Overwrite Failed",
+					"Existing route could not be overwritten; entire import rolled back.")
+				return
+			}
+			res.UpdatedRoutes++
+
+		default:
+			WriteProblem(w, r, http.StatusUnprocessableEntity, "invalid_action", "Invalid Import Action",
+				"Unsupported route action "+action+"; entire import rolled back.")
+			return
+		}
+	}
+
+	if err := tx.Commit(r.Context()); err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not commit OpenAPI import transaction.")
+		return
+	}
+	committed = true
+
+	_ = bumpDraftRevision(r.Context(), h.Store, orgCtx.OrgID, principal.UserID)
+	if h.Audit != nil {
+		_ = h.Audit.RecordRedacted(
+			r.Context(),
+			&orgCtx.OrgID,
+			&principal.UserID,
+			principal.Email,
+			"openapi.import",
+			"service",
+			res.ServiceID,
+			RequestIDFromContext(r.Context()),
+			nil,
+			map[string]any{
+				"service_created": res.ServiceCreated,
+				"created_routes":  res.CreatedRoutes,
+				"updated_routes":  res.UpdatedRoutes,
+				"skipped_routes":  res.SkippedRoutes,
+			},
+		)
+	}
+
+	WriteJSON(w, http.StatusCreated, res)
 }
