@@ -22,6 +22,7 @@ type PollerConfig struct {
 	ControlPlaneURL string
 	SyncToken       string
 	OrgID           string
+	LKGPath         string
 	Interval        time.Duration
 	HTTPTimeout     time.Duration
 	Logger          *slog.Logger
@@ -146,6 +147,11 @@ func (p *Poller) SyncOnce(ctx context.Context) error {
 	if _, err := p.holder.Apply(snap, true); err != nil {
 		return p.recordReject(fmt.Errorf("apply snapshot: %w", err))
 	}
+	if p.cfg.LKGPath != "" {
+		if saveErr := SaveLKG(p.cfg.LKGPath, snap); saveErr != nil {
+			p.logger.Warn("failed to persist LKG snapshot cache", "error", saveErr)
+		}
+	}
 
 	newETag := strings.TrimSpace(resp.Header.Get("ETag"))
 	if newETag == "" && snap.Checksum != "" {
@@ -166,8 +172,34 @@ func (p *Poller) SyncOnce(ctx context.Context) error {
 	return nil
 }
 
+// BootstrapFromLKG restores the last-known-good verified snapshot from disk if configured.
+func (p *Poller) BootstrapFromLKG() error {
+	if p.cfg.LKGPath == "" {
+		return nil
+	}
+	snap, err := LoadLKG(p.cfg.LKGPath)
+	if err != nil {
+		return p.recordReject(err)
+	}
+	if _, err := p.holder.Apply(snap, true); err != nil {
+		return p.recordReject(err)
+	}
+	p.mu.Lock()
+	if snap.Checksum != "" {
+		p.lastETag = `"` + snap.Checksum + `"`
+	}
+	p.mu.Unlock()
+	p.logger.Info("bootstrapped gateway from verified LKG snapshot", "version", snap.Version, "checksum", snap.Checksum)
+	return nil
+}
+
 // Run performs an initial sync and then loops on periodic reconciliation and optional Redis hints until ctx is canceled.
 func (p *Poller) Run(ctx context.Context) {
+	if p.cfg.LKGPath != "" {
+		if err := p.BootstrapFromLKG(); err != nil {
+			p.logger.Warn("LKG bootstrap skipped or invalid", "error", err)
+		}
+	}
 	if err := p.SyncOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		p.logger.Warn("initial snapshot sync failed; keeping last-known-good", "error", err)
 	}
