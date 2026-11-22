@@ -22,6 +22,30 @@ func (h *AuthHandler) MountAuthRoutes(v1 chi.Router) {
 		r.Post("/bootstrap", h.handleBootstrap)
 		r.Post("/login", h.handleLogin)
 		r.Post("/logout", h.handleLogout)
+		r.With(RequireAuth(h.Sessions)).Get("/me", h.handleMe)
+	})
+}
+
+func (h *AuthHandler) handleMe(w http.ResponseWriter, r *http.Request) {
+	principal, ok := PrincipalFromContext(r.Context())
+	if !ok {
+		WriteProblem(w, r, http.StatusUnauthorized, "unauthenticated", "Unauthorized", "Authentication required.")
+		return
+	}
+	memberships, err := h.Sessions.ListUserMemberships(r.Context(), principal.UserID)
+	if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Profile Lookup Failed", "Unable to resolve organization memberships.")
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"user": map[string]any{
+			"id":           principal.UserID,
+			"email":        principal.Email,
+			"display_name": principal.DisplayName,
+		},
+		"csrf_token":  principal.CSRFToken,
+		"expires_at":  principal.ExpiresAt,
+		"memberships": memberships,
 	})
 }
 
