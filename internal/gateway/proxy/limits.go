@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/YASSERRMD/GatewayForge/internal/gateway/resilience"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/snapshot"
 )
 
@@ -35,8 +36,11 @@ func (l ResourceLimits) ResolveBodyLimit(route snapshot.Route) int64 {
 	return 10 << 20
 }
 
-// ResolveRequestTimeout computes the effective request deadline from route and pool configuration.
+// ResolveRequestTimeout computes the effective total request deadline from timeout policy, route, and pool config.
 func (l ResourceLimits) ResolveRequestTimeout(route snapshot.Route, pool snapshot.UpstreamPool) time.Duration {
+	if tp, ok := resilience.ResolveTimeoutPolicy(route.Policies); ok && tp.TotalTimeoutMS > 0 {
+		return time.Duration(tp.TotalTimeoutMS) * time.Millisecond
+	}
 	if route.RequestTimeoutMS > 0 {
 		return time.Duration(route.RequestTimeoutMS) * time.Millisecond
 	}
@@ -47,6 +51,17 @@ func (l ResourceLimits) ResolveRequestTimeout(route snapshot.Route, pool snapsho
 		return l.DefaultRequestTimeout
 	}
 	return 30 * time.Second
+}
+
+// ResolveConnectTimeout computes the effective upstream TCP connect timeout from timeout policy or pool config.
+func (l ResourceLimits) ResolveConnectTimeout(route snapshot.Route, pool snapshot.UpstreamPool) time.Duration {
+	if tp, ok := resilience.ResolveTimeoutPolicy(route.Policies); ok && tp.ConnectTimeoutMS > 0 {
+		return time.Duration(tp.ConnectTimeoutMS) * time.Millisecond
+	}
+	if pool.ConnectTimeoutMS > 0 {
+		return time.Duration(pool.ConnectTimeoutMS) * time.Millisecond
+	}
+	return 3 * time.Second
 }
 
 // CheckHeaderCount rejects requests carrying an excessive number of header fields.
@@ -87,7 +102,9 @@ func (l ResourceLimits) ApplyRequestLimits(
 		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	}
 
-	timeout := l.ResolveRequestTimeout(route, pool)
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	connectTimeout := l.ResolveConnectTimeout(route, pool)
+	totalTimeout := l.ResolveRequestTimeout(route, pool)
+	baseCtx := resilience.WithConnectTimeout(r.Context(), connectTimeout)
+	ctx, cancel := context.WithTimeout(baseCtx, totalTimeout)
 	return r.WithContext(ctx), cancel, true
 }

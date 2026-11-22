@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -12,7 +14,10 @@ import (
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/balancer"
 	gwcors "github.com/YASSERRMD/GatewayForge/internal/gateway/cors"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/ratelimit"
+	"github.com/YASSERRMD/GatewayForge/internal/gateway/resilience"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/policy"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/snapshot"
 )
 
 // Engine executes reverse-proxy requests against the active immutable routing table.
@@ -25,6 +30,9 @@ type Engine struct {
 	Selector       balancer.Selector
 	Auth           *gwauth.Enforcer
 	RateLimit      *ratelimit.Enforcer
+	Health         *resilience.HealthTracker
+	CircuitBreaker *resilience.CircuitBreakerRegistry
+	Bulkhead       *resilience.BulkheadRegistry
 }
 
 // NewEngine creates a streaming reverse-proxy Engine backed by holder.
@@ -36,11 +44,13 @@ func NewEngine(holder *table.Holder, transport http.RoundTripper, pol Destinatio
 		transport = http.DefaultTransport
 	}
 	return &Engine{
-		Holder:    holder,
-		Transport: transport,
-		Policy:    pol,
-		Limits:    DefaultResourceLimits(),
-		Selector:  balancer.NewWeightedRoundRobin(),
+		Holder:         holder,
+		Transport:      transport,
+		Policy:         pol,
+		Limits:         DefaultResourceLimits(),
+		Selector:       balancer.NewWeightedRoundRobin(),
+		CircuitBreaker: resilience.NewCircuitBreakerRegistry(nil),
+		Bulkhead:       resilience.NewBulkheadRegistry(256),
 	}
 }
 
@@ -116,13 +126,46 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enforce per-route/upstream bulkhead concurrency cap before dialing upstream.
+	if e.Bulkhead != nil {
+		bhKey := tbl.OrgID + "|" + match.Route.ID
+		bhLimit := resilience.ResolveMaxConcurrent(match.Route.Policies, 0)
+		releaseBH, ok := e.Bulkhead.Acquire(bhKey, bhLimit)
+		if !ok {
+			w.Header().Set("Retry-After", "1")
+			WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeServiceOverloaded, "route concurrency limit reached")
+			return
+		}
+		defer releaseBH()
+	}
+
+	// Evaluate per-pool/route circuit breaker before forwarding.
+	cbRecord := func(int, error) {}
+	if cbPol, hasCB := resilience.ResolveCircuitBreakerPolicy(match.Route.Policies); hasCB && e.CircuitBreaker != nil {
+		cbKey := tbl.OrgID + "|" + pool.ID
+		recFn, allowed := e.CircuitBreaker.Allow(cbKey, cbPol)
+		if !allowed {
+			WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "upstream circuit breaker is open")
+			return
+		}
+		cbRecord = recFn
+		// Release half-open slot cleanly if request aborts locally before reaching upstream.
+		defer cbRecord(http.StatusOK, nil)
+	}
+
 	sel := e.Selector
 	if sel == nil {
 		sel = balancer.NewWeightedRoundRobin()
 	}
-	target, err := sel.Pick(pool, nil)
+	var healthFilter func(string) bool
+	if e.Health != nil {
+		healthFilter = func(targetID string) bool {
+			return e.Health.IsHealthy(pool.ID, targetID)
+		}
+	}
+	target, err := sel.Pick(pool, healthFilter)
 	if err != nil {
-		WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "no enabled targets available in upstream pool")
+		WriteGatewayError(w, r, http.StatusServiceUnavailable, CodeUpstreamUnavailable, "no healthy enabled targets available in upstream pool")
 		return
 	}
 
@@ -144,12 +187,65 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cancel()
 
-	e.proxyStreaming(w, limitedReq, upstreamURL, corr, stripHeaders)
+	e.proxyStreaming(w, limitedReq, upstreamURL, corr, stripHeaders, pool.ID, target.ID, match.Route.Policies, cbRecord)
 }
 
-func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL, corr Correlation, stripHeaders []string) {
+type retryRoundTripper struct {
+	base      http.RoundTripper
+	pol       policy.RetryPolicy
+	bodyBytes []byte
+}
+
+func (rt *retryRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	var lastResp *http.Response
+	var lastErr error
+	for attempt := 1; attempt <= rt.pol.MaxAttempts; attempt++ {
+		outReq := req.Clone(req.Context())
+		if len(rt.bodyBytes) > 0 {
+			outReq.Body = io.NopCloser(bytes.NewReader(rt.bodyBytes))
+			outReq.ContentLength = int64(len(rt.bodyBytes))
+		}
+		resp, err := rt.base.RoundTrip(outReq)
+		if err == nil && !resilience.IsRetryableOutcome(resp.StatusCode, nil, rt.pol) {
+			return resp, nil
+		}
+		if err != nil && !resilience.IsRetryableOutcome(0, err, rt.pol) {
+			return nil, err
+		}
+		if attempt == rt.pol.MaxAttempts {
+			return resp, err
+		}
+		// Drain and close failed response body before retrying so connections can be reused cleanly.
+		if resp != nil && resp.Body != nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+			_ = resp.Body.Close()
+		}
+		lastResp, lastErr = resp, err
+		delay := resilience.BackoffDelay(attempt, rt.pol, nil)
+		if !resilience.SleepWithBudget(req.Context(), delay, nil) {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, req.Context().Err()
+		}
+	}
+	return lastResp, lastErr
+}
+
+func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL, corr Correlation, stripHeaders []string, poolID, targetID string, policies []snapshot.AttachedPolicy, cbRecord func(int, error)) {
+	transport := e.Transport
+	if retryPol, hasRetry := resilience.ResolveRetryPolicy(policies); hasRetry && resilience.CanRetryMethod(r.Method, retryPol) {
+		if bodyBytes, replayable, err := resilience.PrepareReplayBody(r, retryPol.MaxReplayBodyBytes); err == nil && replayable {
+			transport = &retryRoundTripper{
+				base:      e.Transport,
+				pol:       retryPol,
+				bodyBytes: bodyBytes,
+			}
+		}
+	}
+
 	rp := &httputil.ReverseProxy{
-		Transport:     e.Transport,
+		Transport:     transport,
 		FlushInterval: -1, // stream response chunks immediately without buffering
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = upstreamURL.Scheme
@@ -166,9 +262,21 @@ func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstream
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			StripHopByHop(resp.Header)
+			if e.Health != nil {
+				e.Health.RecordPassiveOutcome(poolID, targetID, resp.StatusCode, nil, resilience.DefaultPassiveConfig())
+			}
+			if cbRecord != nil {
+				cbRecord(resp.StatusCode, nil)
+			}
 			return nil
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
+			if e.Health != nil {
+				e.Health.RecordPassiveOutcome(poolID, targetID, 0, proxyErr, resilience.DefaultPassiveConfig())
+			}
+			if cbRecord != nil {
+				cbRecord(0, proxyErr)
+			}
 			var maxBytesErr *http.MaxBytesError
 			switch {
 			case errors.As(proxyErr, &maxBytesErr):

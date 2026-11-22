@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -27,6 +28,7 @@ func (h *UpstreamHandler) MountUpstreamRoutes(v1 chi.Router) {
 	v1.With(RequireAuth(h.Sessions), RequireOrgContext(h.Sessions), AuditMutationsMiddleware(h.Audit)).Route("/orgs/{orgId}/upstreams", func(r chi.Router) {
 		r.With(RequirePermission(rbac.PermConfigRead)).Get("/", h.handleListPools)
 		r.With(RequirePermission(rbac.PermConfigWrite)).Post("/", h.handleCreatePool)
+		r.With(RequirePermission(rbac.PermConfigRead)).Get("/health", h.handleUpstreamHealthDiagnostics)
 		r.With(RequirePermission(rbac.PermConfigRead)).Get("/{poolId}", h.handleGetPool)
 		r.With(RequirePermission(rbac.PermConfigWrite)).Patch("/{poolId}", h.handleUpdatePool)
 		r.With(RequirePermission(rbac.PermConfigWrite)).Delete("/{poolId}", h.handleDeletePool)
@@ -461,4 +463,93 @@ func (h *UpstreamHandler) handleDeleteTarget(w http.ResponseWriter, r *http.Requ
 	}
 	_ = bumpDraftRevision(r.Context(), h.Store, orgCtx.OrgID, principal.UserID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type safeTargetDiag struct {
+	TargetID string `json:"target_id"`
+	Enabled  bool   `json:"enabled"`
+	Weight   int    `json:"weight"`
+	Scheme   string `json:"scheme,omitempty"`
+	Host     string `json:"host,omitempty"`
+}
+
+type safePoolHealthDiag struct {
+	PoolID           string           `json:"pool_id"`
+	PoolName         string           `json:"pool_name"`
+	DestinationClass string           `json:"destination_class"`
+	Status           string           `json:"status"`
+	EnabledTargets   int              `json:"enabled_targets"`
+	DisabledTargets  int              `json:"disabled_targets"`
+	TotalTargets     int              `json:"total_targets"`
+	Targets          []safeTargetDiag `json:"targets,omitempty"`
+}
+
+// handleUpstreamHealthDiagnostics returns safe aggregated pool/target health visibility.
+// Viewers receive aggregated pool status & counts only (no internal addresses);
+// operators/admins (holding PermConfigWrite) also receive credential-stripped target details.
+func (h *UpstreamHandler) handleUpstreamHealthDiagnostics(w http.ResponseWriter, r *http.Request) {
+	orgCtx, _ := OrgContextFromContext(r.Context())
+	includeTargets := rbac.Allows(orgCtx.Role, rbac.PermConfigWrite)
+
+	rows, err := h.Store.Pool().Query(r.Context(), `
+		SELECT id, name, destination_class
+		FROM upstream_pools
+		WHERE org_id = $1
+		ORDER BY name ASC
+	`, orgCtx.OrgID)
+	if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not load upstream pools.")
+		return
+	}
+	defer rows.Close()
+
+	pools := make([]safePoolHealthDiag, 0)
+	for rows.Next() {
+		var p safePoolHealthDiag
+		if err := rows.Scan(&p.PoolID, &p.PoolName, &p.DestinationClass); err != nil {
+			WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not scan upstream pool.")
+			return
+		}
+		pools = append(pools, p)
+	}
+	rows.Close()
+
+	for i := range pools {
+		targets, err := h.loadPoolTargets(r, orgCtx.OrgID, pools[i].PoolID)
+		if err != nil {
+			WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not load upstream targets.")
+			return
+		}
+		for _, t := range targets {
+			pools[i].TotalTargets++
+			if t.Enabled {
+				pools[i].EnabledTargets++
+			} else {
+				pools[i].DisabledTargets++
+			}
+			if includeTargets {
+				td := safeTargetDiag{
+					TargetID: t.ID,
+					Enabled:  t.Enabled,
+					Weight:   t.Weight,
+				}
+				if parsed, pErr := url.Parse(t.URL); pErr == nil {
+					td.Scheme = parsed.Scheme
+					td.Host = parsed.Host // never includes parsed.User credentials or query secrets
+				}
+				pools[i].Targets = append(pools[i].Targets, td)
+			}
+		}
+		if pools[i].EnabledTargets == 0 {
+			pools[i].Status = "unavailable"
+		} else {
+			pools[i].Status = "healthy"
+		}
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"items":      pools,
+		"total":      len(pools),
+		"visibility": map[bool]string{true: "operator", false: "aggregated_viewer"}[includeTargets],
+	})
 }
