@@ -18,6 +18,7 @@ type Engine struct {
 	Transport      http.RoundTripper
 	Policy         DestinationPolicy
 	TrustedProxies TrustedProxyConfig
+	Limits         ResourceLimits
 }
 
 // NewEngine creates a streaming reverse-proxy Engine backed by holder.
@@ -32,6 +33,7 @@ func NewEngine(holder *table.Holder, transport http.RoundTripper, pol Destinatio
 		Holder:    holder,
 		Transport: transport,
 		Policy:    pol,
+		Limits:    DefaultResourceLimits(),
 	}
 }
 
@@ -77,7 +79,13 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	e.proxyStreaming(w, r, upstreamURL, corr)
+	limitedReq, cancel, ok := e.Limits.ApplyRequestLimits(w, r, match.Route, pool)
+	if !ok {
+		return
+	}
+	defer cancel()
+
+	e.proxyStreaming(w, limitedReq, upstreamURL, corr)
 }
 
 func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstreamURL *url.URL, corr Correlation) {
@@ -99,9 +107,15 @@ func (e *Engine) proxyStreaming(w http.ResponseWriter, r *http.Request, upstream
 			return nil
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, proxyErr error) {
+			var maxBytesErr *http.MaxBytesError
 			switch {
+			case errors.As(proxyErr, &maxBytesErr):
+				WriteGatewayError(rw, req, http.StatusRequestEntityTooLarge, CodePayloadTooLarge, "request body exceeds route size limit")
 			case errors.Is(proxyErr, context.DeadlineExceeded):
 				WriteGatewayError(rw, req, http.StatusGatewayTimeout, CodeUpstreamTimeout, "upstream did not respond before deadline")
+			case errors.Is(proxyErr, context.Canceled):
+				// Client disconnected; write 499 status without upstream retry.
+				rw.WriteHeader(499)
 			case errors.Is(proxyErr, ErrBlockedDestination):
 				WriteGatewayError(rw, req, http.StatusBadGateway, CodeUpstreamBlocked, "upstream destination blocked by policy")
 			default:
