@@ -8,6 +8,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { FieldError, Input, Label, Textarea } from "@/components/ui/input";
 import { EmptyState, ErrorBanner, Skeleton } from "@/components/ui/states";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { ApiKeysDialog } from "@/components/management/api-keys-dialog";
 import { ApiError, apiRequest } from "@/lib/api/client";
 import type { ConsumerItem, PaginatedResponse } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth-context";
@@ -207,18 +208,16 @@ export function ConsumersManager({ renderKeysDialog }: ConsumersManagerProps) {
                 <TableCell className="font-mono text-xs text-[var(--muted-foreground)]">rev-{c.revision}</TableCell>
                 <TableCell className="text-right">
                   <div className="inline-flex items-center gap-1">
-                    {renderKeysDialog && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        aria-label={`Manage API Keys for ${c.name}`}
-                        onClick={() => setKeysConsumer(c)}
-                      >
-                        <KeyRound className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
-                        {canManageKeys ? "API Keys" : "View Keys"}
-                      </Button>
-                    )}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      aria-label={`Manage API Keys for ${c.name}`}
+                      onClick={() => setKeysConsumer(c)}
+                    >
+                      <KeyRound className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+                      {canManageKeys ? "API Keys" : "View Keys"}
+                    </Button>
                     {canWrite && (
                       <>
                         <Button
@@ -323,7 +322,11 @@ export function ConsumersManager({ renderKeysDialog }: ConsumersManagerProps) {
         </div>
       </Dialog>
 
-      {renderKeysDialog?.(keysConsumer, () => setKeysConsumer(null))}
+      {renderKeysDialog ? (
+        renderKeysDialog(keysConsumer, () => setKeysConsumer(null))
+      ) : (
+        <ApiKeysDialog consumer={keysConsumer} onClose={() => setKeysConsumer(null)} />
+      )}
     </div>
   );
 }
