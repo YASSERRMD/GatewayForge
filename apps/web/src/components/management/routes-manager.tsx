@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { AlertTriangle, FileUp } from "lucide-react";
+import { AlertTriangle, Download, FileUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { FieldError, Input, Label, Select } from "@/components/ui/input";
@@ -236,7 +236,17 @@ export function RoutesManager() {
 
   return (
     <>
-      <div className="mb-3 flex justify-end">
+      <div className="mb-3 flex justify-end gap-2">
+        {activeOrgId && (
+          <a
+            href={`/api/v1/orgs/${activeOrgId}/openapi/export`}
+            download="gatewayforge-openapi.json"
+            className="inline-flex h-8 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--card)] px-3 text-xs font-medium text-[var(--foreground)] transition-colors hover:bg-[var(--muted)]"
+          >
+            <Download className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+            Export OpenAPI
+          </a>
+        )}
         <Button type="button" variant="outline" size="sm" onClick={() => setImportOpen(true)}>
           <FileUp className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
           Import OpenAPI

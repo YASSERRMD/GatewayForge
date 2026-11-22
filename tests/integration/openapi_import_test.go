@@ -88,14 +88,6 @@ func TestOpenAPITransactionalImportAndPartialFailureRollback(t *testing.T) {
 	if res.StatusCode != http.StatusCreated {
 		t.Fatalf("bootstrap failed: %d %s", res.StatusCode, string(body))
 	}
-	var boot struct {
-		Org struct {
-			ID string `json:"id"`
-		} `json:"org"`
-	}
-	_ = json.Unmarshal(body, &boot)
-	orgID := boot.Org.ID
-
 	// Login
 	loginRes, loginBody := doOAJSON(t, http.MethodPost, ts.URL+"/api/v1/auth/login", map[string]any{
 		"email":    "oa-admin@acme.test",
@@ -109,6 +101,18 @@ func TestOpenAPITransactionalImportAndPartialFailureRollback(t *testing.T) {
 		CSRFToken string `json:"csrf_token"`
 	}
 	_ = json.Unmarshal(loginBody, &loginOut)
+
+	_, meBody := doOAJSON(t, http.MethodGet, ts.URL+"/api/v1/auth/me", nil, cookies, "")
+	var meOut struct {
+		Memberships []struct {
+			OrgID string `json:"org_id"`
+		} `json:"memberships"`
+	}
+	_ = json.Unmarshal(meBody, &meOut)
+	if len(meOut.Memberships) == 0 || meOut.Memberships[0].OrgID == "" {
+		t.Fatalf("expected org membership from /auth/me, got %s", string(meBody))
+	}
+	orgID := meOut.Memberships[0].OrgID
 
 	// Create mock upstream pool
 	pRes, pBody := doOAJSON(t, http.MethodPost, ts.URL+"/api/v1/orgs/"+orgID+"/upstreams", map[string]any{
@@ -207,5 +211,14 @@ func TestOpenAPITransactionalImportAndPartialFailureRollback(t *testing.T) {
 	_ = pool.QueryRow(context.Background(), `SELECT count(*) FROM audit_events WHERE org_id = $1 AND action = 'openapi.import'`, orgID).Scan(&auditCount)
 	if auditCount != 1 {
 		t.Fatalf("expected 1 openapi.import audit event, got %d", auditCount)
+	}
+
+	// 3. Verify OpenAPI export returns deterministic 3.0.3 JSON including imported route & limitations
+	expRes, expBody := doOAJSON(t, http.MethodGet, ts.URL+"/api/v1/orgs/"+orgID+"/openapi/export", nil, cookies, "")
+	if expRes.StatusCode != http.StatusOK {
+		t.Fatalf("export failed: %d %s", expRes.StatusCode, string(expBody))
+	}
+	if !bytes.Contains(expBody, []byte(`"/v1/products"`)) || !bytes.Contains(expBody, []byte(`"x-gatewayforge-export-limitations"`)) {
+		t.Fatalf("unexpected export body: %s", string(expBody))
 	}
 }

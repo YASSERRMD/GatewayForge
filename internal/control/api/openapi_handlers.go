@@ -27,6 +27,7 @@ func (h *OpenAPIHandler) MountOpenAPIRoutes(v1 chi.Router) {
 	orgAuth.Route("/orgs/{orgId}/openapi", func(r chi.Router) {
 		r.With(RequirePermission(rbac.PermConfigWrite)).Post("/preview", h.handlePreview)
 		r.With(RequirePermission(rbac.PermConfigWrite)).Post("/import", h.handleImport)
+		r.With(RequirePermission(rbac.PermConfigRead)).Get("/export", h.handleExport)
 	})
 }
 
@@ -344,4 +345,67 @@ func (h *OpenAPIHandler) handleImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteJSON(w, http.StatusCreated, res)
+}
+
+func (h *OpenAPIHandler) handleExport(w http.ResponseWriter, r *http.Request) {
+	orgCtx, _ := OrgContextFromContext(r.Context())
+
+	var orgName string
+	_ = h.Store.Pool().QueryRow(r.Context(), `SELECT name FROM organizations WHERE id = $1`, orgCtx.OrgID).Scan(&orgName)
+
+	svcRows, err := h.Store.Pool().Query(r.Context(), `
+		SELECT id, slug, name, description
+		FROM services
+		WHERE org_id = $1 AND deleted_at IS NULL
+		ORDER BY slug ASC
+	`, orgCtx.OrgID)
+	if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not load services for export.")
+		return
+	}
+	defer svcRows.Close()
+
+	services := make([]openapi.ExportServiceInput, 0)
+	for svcRows.Next() {
+		var s openapi.ExportServiceInput
+		if err := svcRows.Scan(&s.ID, &s.Slug, &s.Name, &s.Description); err != nil {
+			WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not scan service for export.")
+			return
+		}
+		services = append(services, s)
+	}
+	svcRows.Close()
+
+	rtRows, err := h.Store.Pool().Query(r.Context(), `
+		SELECT id, service_id, name, host, path_prefix, methods, strip_prefix, priority, enabled
+		FROM routes
+		WHERE org_id = $1
+		ORDER BY priority DESC, path_prefix ASC, id ASC
+	`, orgCtx.OrgID)
+	if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not load routes for export.")
+		return
+	}
+	defer rtRows.Close()
+
+	routes := make([]openapi.ExportRouteInput, 0)
+	for rtRows.Next() {
+		var rt openapi.ExportRouteInput
+		if err := rtRows.Scan(&rt.ID, &rt.ServiceID, &rt.Name, &rt.Host, &rt.PathPrefix, &rt.Methods, &rt.StripPrefix, &rt.Priority, &rt.Enabled); err != nil {
+			WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Database Error", "Could not scan route for export.")
+			return
+		}
+		routes = append(routes, rt)
+	}
+
+	doc := openapi.ExportInventory(orgName, services, routes)
+	raw, err := openapi.MarshalExportJSON(doc)
+	if err != nil {
+		WriteProblem(w, r, http.StatusInternalServerError, "internal_error", "Export Error", "Could not serialize OpenAPI export.")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="gatewayforge-openapi.json"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
 }
