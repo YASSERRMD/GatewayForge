@@ -21,6 +21,7 @@ var orgSlugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$`)
 type OrgHandler struct {
 	Store    *store.Store
 	Sessions *auth.SessionManager
+	Audit    *AuditRecorder
 }
 
 // MountOrgRoutes registers /orgs and /orgs/{orgId} routes under v1.
@@ -29,7 +30,7 @@ func (h *OrgHandler) MountOrgRoutes(v1 chi.Router) {
 		r.Get("/", h.handleListOrgs)
 		r.Post("/", h.handleCreateOrg)
 
-		r.With(RequireOrgContext(h.Sessions)).Route("/{orgId}", func(orgR chi.Router) {
+		r.With(RequireOrgContext(h.Sessions), AuditMutationsMiddleware(h.Audit)).Route("/{orgId}", func(orgR chi.Router) {
 			orgR.With(RequirePermission(rbac.PermOrgRead)).Get("/", h.handleGetOrg)
 			orgR.With(RequirePermission(rbac.PermOrgUpdate)).Patch("/", h.handleUpdateOrg)
 		})

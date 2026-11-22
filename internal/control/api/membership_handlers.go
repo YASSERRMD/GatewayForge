@@ -19,11 +19,12 @@ type MembershipHandler struct {
 	Store    *store.Store
 	Sessions *auth.SessionManager
 	Hasher   auth.PasswordHasher
+	Audit    *AuditRecorder
 }
 
 // MountMembershipRoutes mounts /orgs/{orgId}/members routes under an authenticated org subrouter or directly on v1.
 func (h *MembershipHandler) MountMembershipRoutes(v1 chi.Router) {
-	v1.With(RequireAuth(h.Sessions), RequireOrgContext(h.Sessions)).Route("/orgs/{orgId}/members", func(r chi.Router) {
+	v1.With(RequireAuth(h.Sessions), RequireOrgContext(h.Sessions), AuditMutationsMiddleware(h.Audit)).Route("/orgs/{orgId}/members", func(r chi.Router) {
 		r.With(RequirePermission(rbac.PermMemberRead)).Get("/", h.handleListMembers)
 		r.With(RequirePermission(rbac.PermMemberWrite)).Post("/", h.handleAddMember)
 		r.With(RequirePermission(rbac.PermMemberWrite)).Patch("/{userId}", h.handleUpdateMemberRole)
