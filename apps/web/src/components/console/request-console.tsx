@@ -2,11 +2,11 @@
 
 import * as React from "react";
 import { Play, Plus, Trash2 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { FieldError, Input, Label, Select, Textarea } from "@/components/ui/input";
 import { ErrorBanner } from "@/components/ui/states";
+import { ResponsePanel } from "@/components/console/response-panel";
 import { ApiError, apiRequest } from "@/lib/api/client";
 import type { PaginatedResponse, RouteItem } from "@/lib/api/types";
 import { useAuth } from "@/lib/auth-context";
@@ -356,35 +356,7 @@ export function RequestConsole({
           {renderResponse ? (
             renderResponse(response, running)
           ) : (
-            <Card className="h-full">
-              <CardHeader>
-                <CardTitle>Response</CardTitle>
-                <CardDescription>Gateway status, timing, headers, and safely escaped payload.</CardDescription>
-              </CardHeader>
-              <CardContent>
-                {running ? (
-                  <p className="text-sm text-[var(--muted-foreground)]">Waiting for gateway response…</p>
-                ) : !response ? (
-                  <p className="text-sm text-[var(--muted-foreground)]">
-                    Send a request to inspect status, timing, response headers, and body.
-                  </p>
-                ) : (
-                  <div className="space-y-3">
-                    <div className="flex items-center gap-2">
-                      <Badge variant={response.status < 400 ? "success" : "destructive"}>
-                        HTTP {response.status}
-                      </Badge>
-                      <span className="font-mono text-xs text-[var(--muted-foreground)]">
-                        {response.duration_ms} ms
-                      </span>
-                    </div>
-                    <pre className="max-h-96 overflow-auto rounded border border-[var(--border)] bg-[var(--muted)]/40 p-3 font-mono text-xs">
-                      {response.body}
-                    </pre>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
+            <ResponsePanel response={response} running={running} />
           )}
         </div>
 
