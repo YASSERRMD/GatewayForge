@@ -4,23 +4,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
+	"github.com/YASSERRMD/GatewayForge/internal/control/api"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/health"
 )
 
 // ServerConfig configures the control-plane HTTP server.
 type ServerConfig struct {
-	Addr              string
-	ReadHeaderTimeout time.Duration
-	ReadTimeout       time.Duration
-	WriteTimeout      time.Duration
-	IdleTimeout       time.Duration
-	ShutdownTimeout   time.Duration
+	Addr               string
+	ReadHeaderTimeout  time.Duration
+	ReadTimeout        time.Duration
+	WriteTimeout       time.Duration
+	IdleTimeout        time.Duration
+	ShutdownTimeout    time.Duration
+	AllowedCORSOrigins []string
+	Logger             *slog.Logger
+	MountV1            func(r chi.Router)
 }
 
 // DefaultServerConfig returns safe defaults for the control-plane HTTP server.
@@ -36,24 +43,25 @@ func DefaultServerConfig() ServerConfig {
 		}
 	}
 	return ServerConfig{
-		Addr:              addr,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		ShutdownTimeout:   time.Duration(shutdownSec) * time.Second,
+		Addr:               addr,
+		ReadHeaderTimeout:  5 * time.Second,
+		ReadTimeout:        15 * time.Second,
+		WriteTimeout:       30 * time.Second,
+		IdleTimeout:        60 * time.Second,
+		ShutdownTimeout:    time.Duration(shutdownSec) * time.Second,
+		AllowedCORSOrigins: []string{"http://localhost:3000"},
 	}
 }
 
-// Server wraps the control-plane HTTP listener and health registry.
+// Server wraps the control-plane HTTP listener, Chi router, and health registry.
 type Server struct {
 	cfg        ServerConfig
 	httpServer *http.Server
 	health     *health.Registry
-	mux        *http.ServeMux
+	router     *chi.Mux
 }
 
-// NewServer constructs a control-plane HTTP server with health endpoints registered.
+// NewServer constructs a control-plane HTTP server with Chi routing and health endpoints.
 func NewServer(cfg ServerConfig) *Server {
 	if cfg.Addr == "" {
 		cfg.Addr = ":8080"
@@ -66,13 +74,16 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 
 	reg := health.NewRegistry("control-plane")
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health/live", reg.LiveHandler())
-	mux.HandleFunc("/health/ready", reg.ReadyHandler())
+	router := api.NewRouter(api.RouterOptions{
+		Health:             reg,
+		Logger:             cfg.Logger,
+		AllowedCORSOrigins: cfg.AllowedCORSOrigins,
+		MountV1:            cfg.MountV1,
+	})
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           mux,
+		Handler:           router,
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
 		ReadTimeout:       cfg.ReadTimeout,
 		WriteTimeout:      cfg.WriteTimeout,
@@ -83,7 +94,7 @@ func NewServer(cfg ServerConfig) *Server {
 		cfg:        cfg,
 		httpServer: srv,
 		health:     reg,
-		mux:        mux,
+		router:     router,
 	}
 }
 
@@ -94,7 +105,7 @@ func (s *Server) Health() *health.Registry {
 
 // Handler returns the root HTTP handler for testing or embedding.
 func (s *Server) Handler() http.Handler {
-	return s.mux
+	return s.router
 }
 
 // Serve accepts incoming connections on ln and shuts down gracefully when ctx is canceled.
