@@ -6,6 +6,8 @@ import (
 	"net"
 	"net/http"
 	"time"
+
+	"github.com/YASSERRMD/GatewayForge/internal/gateway/resilience"
 )
 
 // TransportConfig tunes outbound connection pooling and upstream dial/TLS timeouts.
@@ -84,6 +86,11 @@ func NewSafeTransport(cfg TransportConfig, pol DestinationPolicy) *http.Transpor
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     true,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if ct := resilience.ConnectTimeoutFromContext(ctx); ct > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, ct)
+				defer cancel()
+			}
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
 				return nil, fmt.Errorf("%w: malformed dial address", ErrBlockedDestination)
