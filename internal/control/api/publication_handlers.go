@@ -459,6 +459,31 @@ func (h *PublicationHandler) handleActivatePublication(w http.ResponseWriter, r 
 	}
 	committed = true
 
+	if h.Audit != nil {
+		action := "publication.activate"
+		if isRollback {
+			action = "publication.rollback"
+		}
+		_ = h.Audit.RecordRedacted(
+			r.Context(),
+			&orgCtx.OrgID,
+			&principal.UserID,
+			principal.Email,
+			action,
+			"publication",
+			targetPubID,
+			RequestIDFromContext(r.Context()),
+			map[string]any{"active_version": currentActiveVer},
+			map[string]any{
+				"active_version":      version,
+				"checksum":            checksum,
+				"is_rollback":         isRollback,
+				"reason":              strings.TrimSpace(in.Reason),
+				"activation_revision": nextActRev,
+			},
+		)
+	}
+
 	if h.OnActivated != nil {
 		h.OnActivated(r.Context(), ActivationEvent{
 			OrgID:       orgCtx.OrgID,
