@@ -1,12 +1,13 @@
 openapi: 3.1.0
 info:
   title: GatewayForge Control Plane API
-  version: 0.3.0
+  version: 1.0.0
   description: |
     Self-hosted multi-tenant API gateway control plane contract.
     All tenant-scoped endpoints live under `/api/v1/orgs/{orgId}` and enforce explicit membership, RBAC, and CSRF protection on state-changing requests.
+    Gateway data-plane sync uses `/api/v1/gateway/snapshots/active` authenticated via `Authorization: Bearer <GATEWAY_SYNC_TOKEN>` with ETag conditional caching.
 servers:
-  - url: http://localhost:18080
+  - url: http://127.0.0.1:18080
     description: Local Docker Compose control plane
 components:
   securitySchemes:
@@ -18,6 +19,10 @@ components:
       type: apiKey
       in: header
       name: X-CSRF-Token
+    gatewaySyncBearer:
+      type: http
+      scheme: bearer
+      description: Shared data-plane sync token (`GATEWAY_SYNC_TOKEN`), supports comma-separated overlap during rotation.
   schemas:
     Problem:
       type: object
@@ -66,6 +71,83 @@ components:
         display_name: { type: string }
         role: { type: string, enum: [owner, admin, developer, viewer] }
         is_active: { type: boolean }
+    Service:
+      type: object
+      required: [id, org_id, env_id, slug, name, enabled, revision]
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        env_id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        description: { type: string }
+        enabled: { type: boolean }
+        revision: { type: integer }
+    UpstreamPool:
+      type: object
+      required: [id, org_id, env_id, name, destination_class, revision]
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        env_id: { type: string, format: uuid }
+        name: { type: string }
+        destination_class: { type: string, enum: [public_http, mock_local, internal_explicit] }
+        connect_timeout_ms: { type: integer }
+        read_timeout_ms: { type: integer }
+        health_check_path: { type: string }
+        revision: { type: integer }
+    Route:
+      type: object
+      required: [id, org_id, env_id, service_id, upstream_pool_id, name, host, path_prefix, methods, priority, enabled, revision]
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        env_id: { type: string, format: uuid }
+        service_id: { type: string, format: uuid }
+        upstream_pool_id: { type: string, format: uuid }
+        name: { type: string }
+        host: { type: string }
+        path_prefix: { type: string }
+        methods:
+          type: array
+          items: { type: string }
+        strip_prefix: { type: boolean }
+        priority: { type: integer }
+        enabled: { type: boolean }
+        revision: { type: integer }
+    Consumer:
+      type: object
+      required: [id, org_id, name, enabled, revision]
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        name: { type: string }
+        external_ref: { type: string }
+        enabled: { type: boolean }
+        revision: { type: integer }
+    Policy:
+      type: object
+      required: [id, org_id, name, policy_type, schema_version, config, enabled, revision]
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        name: { type: string }
+        policy_type: { type: string, enum: [auth, rate_limit, timeout, retry, circuit_breaker, cors] }
+        schema_version: { type: integer }
+        config: { type: object }
+        enabled: { type: boolean }
+        revision: { type: integer }
+    Publication:
+      type: object
+      required: [id, org_id, version, checksum, status]
+      properties:
+        id: { type: string, format: uuid }
+        org_id: { type: string, format: uuid }
+        version: { type: integer }
+        checksum: { type: string }
+        status: { type: string, enum: [published, active, superseded, rolled_back] }
+        change_note: { type: string }
+        created_at: { type: string, format: date-time }
     AuditEvent:
       type: object
       required: [id, action, target_type, request_id, created_at]
@@ -91,6 +173,11 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+    head:
+      summary: Control-plane liveness probe (HEAD)
+      responses:
+        "200":
+          description: Process is live
   /health/ready:
     get:
       summary: Control-plane readiness probe
@@ -101,6 +188,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Dependency unavailable or draining
+    head:
+      summary: Control-plane readiness probe (HEAD)
+      responses:
+        "200":
+          description: Service and dependencies are ready
         "503":
           description: Dependency unavailable or draining
   /api/v1/meta:
@@ -234,6 +328,438 @@ paths:
       responses:
         "204": { description: Membership revoked }
         "409": { description: Last owner cannot be removed }
+  /api/v1/orgs/{orgId}/environments:
+    get:
+      summary: List tenant deployment environments
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Environments for the organization }
+  /api/v1/orgs/{orgId}/services:
+    get:
+      summary: List logical services in organization
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Paginated services list }
+    post:
+      summary: Create a logical service
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "201":
+          description: Service created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Service"
+  /api/v1/orgs/{orgId}/services/{serviceId}:
+    get:
+      summary: Get service detail
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Service object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Service"
+    patch:
+      summary: Update service with optimistic concurrency
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "200": { description: Service updated }
+        "409": { description: Stale revision conflict }
+    delete:
+      summary: Soft-delete service
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "204": { description: Service deleted }
+  /api/v1/orgs/{orgId}/upstreams:
+    get:
+      summary: List upstream pools and targets
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Paginated upstream pools }
+    post:
+      summary: Create an upstream pool with SSRF-validated destination class
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "201":
+          description: Upstream pool created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpstreamPool"
+  /api/v1/orgs/{orgId}/upstreams/health:
+    get:
+      summary: Inspect upstream pool health diagnostics
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Upstream health check status }
+  /api/v1/orgs/{orgId}/upstreams/{poolId}:
+    get:
+      summary: Get upstream pool detail and targets
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Upstream pool object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpstreamPool"
+    patch:
+      summary: Update upstream pool settings
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "200": { description: Upstream pool updated }
+        "409": { description: Stale revision conflict }
+    delete:
+      summary: Delete upstream pool
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "204": { description: Upstream pool deleted }
+  /api/v1/orgs/{orgId}/upstreams/{poolId}/targets:
+    post:
+      summary: Add an SSRF-validated target URL to an upstream pool
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "201": { description: Target added }
+        "422": { description: Target URL blocked by SSRF or validation policy }
+  /api/v1/orgs/{orgId}/upstreams/{poolId}/targets/{targetId}:
+    delete:
+      summary: Remove a target from an upstream pool
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "204": { description: Target deleted }
+  /api/v1/orgs/{orgId}/routes:
+    get:
+      summary: List configured routes
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Paginated routes list }
+    post:
+      summary: Create a route binding host, path prefix, methods, service, and upstream pool
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "201":
+          description: Route created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Route"
+  /api/v1/orgs/{orgId}/routes/preview:
+    get:
+      summary: Preview deterministic route matching precedence order
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Ordered route match table }
+  /api/v1/orgs/{orgId}/routes/{routeId}:
+    get:
+      summary: Get route detail
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Route object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Route"
+    patch:
+      summary: Update route with optimistic concurrency
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "200": { description: Route updated }
+        "409": { description: Stale revision conflict }
+    delete:
+      summary: Delete route
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "204": { description: Route deleted }
+  /api/v1/orgs/{orgId}/consumers:
+    get:
+      summary: List API consumers
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Paginated consumers list }
+    post:
+      summary: Create an API consumer
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "201":
+          description: Consumer created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Consumer"
+  /api/v1/orgs/{orgId}/consumers/{consumerId}:
+    get:
+      summary: Get consumer detail
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Consumer object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Consumer"
+    patch:
+      summary: Update consumer
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "200": { description: Consumer updated }
+    delete:
+      summary: Delete consumer
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "204": { description: Consumer deleted }
+  /api/v1/orgs/{orgId}/consumers/{consumerId}/keys:
+    get:
+      summary: List non-secret API key metadata for consumer
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: API key prefixes and status (never plaintext secrets) }
+    post:
+      summary: Issue a new API key (plaintext secret returned once in response only)
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "201": { description: API key issued with one-time plaintext secret }
+  /api/v1/orgs/{orgId}/keys/{keyId}/revoke:
+    post:
+      summary: Immediately revoke an API key and notify gateways
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "200": { description: Key revoked }
+  /api/v1/orgs/{orgId}/keys/{keyId}/rotate:
+    post:
+      summary: Rotate an API key with optional grace overlap window
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "201": { description: Replacement API key issued }
+  /api/v1/orgs/{orgId}/policies:
+    get:
+      summary: List policies and attachments
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Paginated policies list }
+    post:
+      summary: Create a validated policy (auth, rate_limit, timeout, retry, circuit_breaker, cors)
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "201":
+          description: Policy created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Policy"
+  /api/v1/orgs/{orgId}/policies/{policyId}:
+    get:
+      summary: Get policy detail and attachments
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: Policy object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Policy"
+    patch:
+      summary: Update policy configuration
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "200": { description: Policy updated }
+    delete:
+      summary: Delete policy
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "204": { description: Policy deleted }
+  /api/v1/orgs/{orgId}/policies/{policyId}/attachments:
+    post:
+      summary: Attach policy to a service, route, or consumer
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "201": { description: Policy attached }
+  /api/v1/orgs/{orgId}/policies/{policyId}/attachments/{attachmentId}:
+    delete:
+      summary: Detach policy from target
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "204": { description: Policy detached }
+  /api/v1/orgs/{orgId}/draft:
+    get:
+      summary: Load current draft snapshot preview and validation report
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Draft revision, validation report, and compiled preview }
+  /api/v1/orgs/{orgId}/draft/diff:
+    get:
+      summary: Compare current draft against the currently active publication (redacted)
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Structured diff summary without secret hashes }
+  /api/v1/orgs/{orgId}/draft/validate:
+    post:
+      summary: Run strict pre-publish validation on current draft
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "200": { description: Validation result with actionable field errors }
+  /api/v1/orgs/{orgId}/publications:
+    get:
+      summary: List immutable config publications and active version
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Ordered publication history }
+    post:
+      summary: Compile, validate, and publish an immutable versioned snapshot
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "201":
+          description: Immutable publication created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Publication"
+        "409": { description: Stale draft revision conflict }
+        "422": { description: Draft validation failed }
+  /api/v1/orgs/{orgId}/publications/{version}/activate:
+    post:
+      summary: Activate or roll back to a specific immutable publication version
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "200": { description: Publication activated and Redis config hint emitted }
+        "409": { description: Optimistic concurrency mismatch }
+  /api/v1/orgs/{orgId}/console/execute:
+    post:
+      summary: Execute an API test request strictly anchored to the configured GatewayForge data plane
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "200": { description: Proxied gateway response status, headers, latency, and bounded body }
+        "422": { description: Invalid method or disallowed target path }
+  /api/v1/orgs/{orgId}/openapi/preview:
+    post:
+      summary: Parse OpenAPI 3.0/3.1 JSON or YAML (rejecting external $ref) and preview route collision plan
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "200": { description: Parsed candidates and collision detection report }
+  /api/v1/orgs/{orgId}/openapi/import:
+    post:
+      summary: Transactionally import selected OpenAPI routes into the organization draft
+      security:
+        - sessionCookie: []
+          csrfHeader: []
+      responses:
+        "201": { description: Selected services/routes imported into draft }
+  /api/v1/orgs/{orgId}/openapi/export:
+    get:
+      summary: Export organization services and routes as an OpenAPI 3.0.3 document
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Generated OpenAPI 3.0.3 JSON document }
+  /api/v1/orgs/{orgId}/gateways:
+    get:
+      summary: List active gateway replicas, converged config checksums, and heartbeat freshness
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Gateway fleet convergence status }
+  /api/v1/orgs/{orgId}/metrics/summary:
+    get:
+      summary: Query aggregated traffic KPIs (RPS, error rate, p95 latency)
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Summary telemetry metrics }
+  /api/v1/orgs/{orgId}/metrics/timeseries:
+    get:
+      summary: Query time-bucketed request volume and latency series
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Time-series metric buckets }
+  /api/v1/orgs/{orgId}/metrics/errors:
+    get:
+      summary: Query top erroring routes and status breakdown
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Error breakdown metrics }
+  /api/v1/orgs/{orgId}/telemetry/traces/{requestId}:
+    get:
+      summary: Look up trace correlation metadata and optional Jaeger link for a request ID
+      security:
+        - sessionCookie: []
+      responses:
+        "200": { description: Correlated trace ID and viewer link }
+        "404": { description: No trace recorded for request ID }
   /api/v1/orgs/{orgId}/audit-events:
     get:
       summary: List append-only redacted audit events with filters
@@ -253,3 +779,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuditEvent"
+  /api/v1/gateway/snapshots/active:
+    get:
+      summary: Fetch the compiled active snapshot for gateway data-plane synchronization
+      security:
+        - gatewaySyncBearer: []
+      responses:
+        "200": { description: Full signed/checksummed snapshot payload with ETag }
+        "304": { description: Gateway already holds latest active snapshot checksum }
+        "401": { description: Invalid or missing gateway sync bearer token }
