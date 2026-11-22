@@ -1,0 +1,29 @@
+name: gatewayforge
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gatewayforge}
+      POSTGRES_USER: ${POSTGRES_USER:-gatewayforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gatewayforge_local_dev_pw}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5439}:5432"
+    volumes:
+      - gatewayforge_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gatewayforge} -d ${POSTGRES_DB:-gatewayforge}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - gatewayforge-internal
+
+volumes:
+  gatewayforge_pgdata:
+
+networks:
+  gatewayforge-internal:
+    driver: bridge
