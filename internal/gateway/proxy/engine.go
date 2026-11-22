@@ -10,6 +10,7 @@ import (
 
 	gwauth "github.com/YASSERRMD/GatewayForge/internal/gateway/auth"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/balancer"
+	gwcors "github.com/YASSERRMD/GatewayForge/internal/gateway/cors"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
 )
 
@@ -46,6 +47,19 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r, corr := AttachCorrelation(w, r)
 
 	tbl := e.Holder.Current()
+
+	// Evaluate browser CORS preflight before auth on routes with a CORS policy.
+	if gwcors.IsPreflight(r) {
+		reqMethod := strings.ToUpper(strings.TrimSpace(r.Header.Get("Access-Control-Request-Method")))
+		preMatch := tbl.Matcher.Match(r.Host, reqMethod, r.URL.Path)
+		if preMatch.Matched {
+			if corsCfg, hasCORS := gwcors.ResolveEffective(preMatch.Route.Policies); hasCORS {
+				gwcors.HandlePreflight(w, r, corsCfg)
+				return
+			}
+		}
+	}
+
 	match := tbl.Matcher.Match(r.Host, r.Method, r.URL.Path)
 	if !match.Matched {
 		if match.MethodMismatch {
@@ -57,6 +71,11 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		WriteGatewayError(w, r, http.StatusNotFound, CodeRouteNotFound, "no configured route matches this request")
 		return
+	}
+
+	// Apply CORS response headers for matched routes (including error responses).
+	if corsCfg, hasCORS := gwcors.ResolveEffective(match.Route.Policies); hasCORS {
+		gwcors.ApplyResponseHeaders(w, r, corsCfg)
 	}
 
 	// Enforce route/service/org consumer authentication & scopes before proxying.

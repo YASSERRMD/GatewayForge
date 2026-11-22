@@ -143,6 +143,19 @@ func ValidateDraft(in DraftInput, pol netsec.TargetPolicy) ValidationReport {
 		var obj map[string]any
 		if err := json.Unmarshal(p.Config, &obj); err != nil || obj == nil {
 			addErr("invalid_policy_config", resName, "policy config must be a valid JSON object")
+			continue
+		}
+		if p.PolicyType == "cors" {
+			allowCreds, _ := obj["allow_credentials"].(bool)
+			if allowCreds {
+				if origins, ok := obj["allowed_origins"].([]any); ok {
+					for _, raw := range origins {
+						if s, ok := raw.(string); ok && strings.TrimSpace(s) == "*" {
+							addErr("invalid_cors_policy", resName, "CORS policy cannot combine wildcard '*' origin with allow_credentials=true")
+						}
+					}
+				}
+			}
 		}
 	}
 
