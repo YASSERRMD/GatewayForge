@@ -2,15 +2,18 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/proxy"
+	syncer "github.com/YASSERRMD/GatewayForge/internal/gateway/sync"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/health"
 )
@@ -57,6 +60,9 @@ type Server struct {
 	transport  *http.Transport
 	engine     *proxy.Engine
 	mux        *http.ServeMux
+
+	statusMu sync.RWMutex
+	statusFn func() syncer.SyncStatus
 }
 
 // NewServer constructs a gateway data-plane server with independent health endpoints
@@ -87,7 +93,6 @@ func NewServer(cfg ServerConfig) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", reg.LiveHandler())
 	mux.HandleFunc("/health/ready", reg.ReadyHandler())
-	mux.Handle("/", eng)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -96,7 +101,7 @@ func NewServer(cfg ServerConfig) *Server {
 		IdleTimeout:       cfg.IdleTimeout,
 	}
 
-	return &Server{
+	s := &Server{
 		cfg:        cfg,
 		httpServer: srv,
 		health:     reg,
@@ -105,6 +110,42 @@ func NewServer(cfg ServerConfig) *Server {
 		engine:     eng,
 		mux:        mux,
 	}
+	mux.HandleFunc("/health/config", s.handleConfigStatus)
+	mux.Handle("/", eng)
+	return s
+}
+
+// AttachSyncStatus binds a read-only sync diagnostics provider for /health/config.
+func (s *Server) AttachSyncStatus(fn func() syncer.SyncStatus) {
+	s.statusMu.Lock()
+	defer s.statusMu.Unlock()
+	s.statusFn = fn
+}
+
+func (s *Server) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	s.statusMu.RLock()
+	fn := s.statusFn
+	s.statusMu.RUnlock()
+
+	var st syncer.SyncStatus
+	if fn != nil {
+		st = fn()
+	} else {
+		cur := s.holder.Current()
+		st = syncer.SyncStatus{
+			ActiveVersion: cur.Version,
+			Checksum:      cur.Checksum,
+			LastError:     s.holder.LastError(),
+		}
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(st)
 }
 
 // Health returns the gateway readiness registry.
