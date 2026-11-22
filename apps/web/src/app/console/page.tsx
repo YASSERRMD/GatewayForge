@@ -1,10 +1,10 @@
 import { AppShell } from "@/components/app-shell";
-import { RequestConsole } from "@/components/console/request-console";
+import { ConsoleWorkspace } from "@/components/console/console-workspace";
 
 export default function ConsolePage() {
   return (
     <AppShell>
-      <RequestConsole />
+      <ConsoleWorkspace />
     </AppShell>
   );
 }
