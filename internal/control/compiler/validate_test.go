@@ -24,7 +24,7 @@ func TestValidateDraftExhaustiveChecks(t *testing.T) {
 				{ID: "r1", Name: "echo", ServiceID: "s1", UpstreamPoolID: "p1", Host: "api.local", PathPrefix: "/echo", Methods: []string{"GET"}, Priority: 100, Enabled: true},
 			},
 			Policies: map[string]PolicyRecord{
-				"pol1": {ID: "pol1", Name: "rl", PolicyType: "rate_limit", SchemaVersion: 1, Config: json.RawMessage(`{"rpm":60}`), Enabled: true},
+				"pol1": {ID: "pol1", Name: "rl", PolicyType: "rate_limit", SchemaVersion: 1, Config: json.RawMessage(`{"requests_per_window":60,"window_seconds":60,"key_by":"consumer"}`), Enabled: true},
 			},
 			Attachments: []AttachmentRecord{{PolicyID: "pol1", ScopeType: "route", RouteID: "r1"}},
 		}

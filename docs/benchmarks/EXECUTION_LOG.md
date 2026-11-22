@@ -14,4 +14,5 @@
 | 03 — Control-plane auth | `phase/03-control-api-auth` | 2026-11-22 07:30 | 2026-11-22 07:46 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/3 | `c61870891a228829117ba2e8d8abd673dbbdb606` | Merged |
 | 04 — Proxy data plane | `phase/04-proxy-engine` | 2026-11-22 07:47 | 2026-11-22 08:00 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/4 | `c3521851351619ada4c87aa2e10910b2867438de` | Merged |
 | 05 — Dynamic config | `phase/05-dynamic-config` | 2026-11-22 08:01 | 2026-11-22 08:17 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/5 | `ac8f97005dde01eb69eeb16348f460f18c112b42` | Merged |
-| 06 — Consumer auth | `phase/06-consumer-security` | 2026-11-22 08:17 | TBD | In progress | TBD | TBD | In progress |
+| 06 — Consumer auth | `phase/06-consumer-security` | 2026-11-22 08:17 | 2026-11-22 08:39 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/6 | `e9eb0eb43db7a8533166c1f5c8a448340fb43f40` | Merged |
+| 07 — Rate limits | `phase/07-rate-limits` | 2026-11-22 08:39 | TBD | In progress | TBD | TBD | In progress |

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/YASSERRMD/GatewayForge/internal/shared/netsec"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/policy"
 )
 
 var validPolicyTypes = map[string]struct{}{
@@ -155,6 +156,16 @@ func ValidateDraft(in DraftInput, pol netsec.TargetPolicy) ValidationReport {
 						}
 					}
 				}
+			}
+		}
+		if p.PolicyType == "rate_limit" {
+			if _, err := policy.ParseRateLimitPolicy(p.Config); err != nil {
+				addErr("invalid_rate_limit_policy", resName, err.Error())
+			}
+		}
+		if p.PolicyType == "quota" {
+			if _, err := policy.ParseQuotaPolicy(p.Config); err != nil {
+				addErr("invalid_quota_policy", resName, err.Error())
 			}
 		}
 	}
