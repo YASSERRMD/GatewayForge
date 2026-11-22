@@ -14,6 +14,7 @@ import (
 
 	gwauth "github.com/YASSERRMD/GatewayForge/internal/gateway/auth"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/proxy"
+	"github.com/YASSERRMD/GatewayForge/internal/gateway/ratelimit"
 	syncer "github.com/YASSERRMD/GatewayForge/internal/gateway/sync"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/health"
@@ -129,6 +130,11 @@ func (s *Server) AttachSyncStatus(fn func() syncer.SyncStatus) {
 	s.statusMu.Lock()
 	defer s.statusMu.Unlock()
 	s.statusFn = fn
+}
+
+// AttachRateLimiter binds a distributed or local rate-limit/quota enforcer to the proxy engine.
+func (s *Server) AttachRateLimiter(enforcer *ratelimit.Enforcer) {
+	s.engine.RateLimit = enforcer
 }
 
 func (s *Server) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
