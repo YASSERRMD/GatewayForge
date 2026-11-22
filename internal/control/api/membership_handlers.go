@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -96,8 +95,7 @@ func (h *MembershipHandler) handleAddMember(w http.ResponseWriter, r *http.Reque
 	orgCtx, _ := OrgContextFromContext(r.Context())
 
 	var in addMemberRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in); err != nil {
-		WriteProblem(w, r, http.StatusBadRequest, "invalid_json", "Invalid JSON", "Request body must be valid JSON.")
+	if !DecodeStrictJSON(w, r, 64<<10, &in) {
 		return
 	}
 	email := strings.ToLower(strings.TrimSpace(in.Email))
@@ -198,8 +196,7 @@ func (h *MembershipHandler) handleUpdateMemberRole(w http.ResponseWriter, r *htt
 	}
 
 	var in updateMemberRoleRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&in); err != nil {
-		WriteProblem(w, r, http.StatusBadRequest, "invalid_json", "Invalid JSON", "Request body must be valid JSON.")
+	if !DecodeStrictJSON(w, r, 16<<10, &in) {
 		return
 	}
 	newRole, err := rbac.ParseRole(strings.TrimSpace(in.Role))

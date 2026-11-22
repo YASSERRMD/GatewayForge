@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -55,8 +54,7 @@ func (h *AuthHandler) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in auth.BootstrapInput
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&in); err != nil {
-		WriteProblem(w, r, http.StatusBadRequest, "invalid_json", "Invalid JSON", "Request body must be valid JSON.")
+	if !DecodeStrictJSON(w, r, 64<<10, &in) {
 		return
 	}
 	res, err := h.Bootstrap.Bootstrap(r.Context(), in)
@@ -83,8 +81,7 @@ type loginRequest struct {
 
 func (h *AuthHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var in loginRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in); err != nil {
-		WriteProblem(w, r, http.StatusBadRequest, "invalid_json", "Invalid JSON", "Request body must be valid JSON.")
+	if !DecodeStrictJSON(w, r, 32<<10, &in) {
 		return
 	}
 	rawToken, principal, err := h.Sessions.Login(r.Context(), in.Email, in.Password)

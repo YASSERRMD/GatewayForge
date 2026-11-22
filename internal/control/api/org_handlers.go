@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -122,8 +121,7 @@ func (h *OrgHandler) handleCreateOrg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in createOrgRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in); err != nil {
-		WriteProblem(w, r, http.StatusBadRequest, "invalid_json", "Invalid JSON", "Request body must be valid JSON.")
+	if !DecodeStrictJSON(w, r, 64<<10, &in) {
 		return
 	}
 	slug := strings.ToLower(strings.TrimSpace(in.Slug))
@@ -218,8 +216,7 @@ type updateOrgRequest struct {
 func (h *OrgHandler) handleUpdateOrg(w http.ResponseWriter, r *http.Request) {
 	orgCtx, _ := OrgContextFromContext(r.Context())
 	var in updateOrgRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&in); err != nil {
-		WriteProblem(w, r, http.StatusBadRequest, "invalid_json", "Invalid JSON", "Request body must be valid JSON.")
+	if !DecodeStrictJSON(w, r, 64<<10, &in) {
 		return
 	}
 
