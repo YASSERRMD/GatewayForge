@@ -15,6 +15,7 @@ import (
 	gwauth "github.com/YASSERRMD/GatewayForge/internal/gateway/auth"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/proxy"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/ratelimit"
+	"github.com/YASSERRMD/GatewayForge/internal/gateway/resilience"
 	syncer "github.com/YASSERRMD/GatewayForge/internal/gateway/sync"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/health"
@@ -56,14 +57,15 @@ func DefaultServerConfig() ServerConfig {
 // Server wraps the independent gateway data-plane HTTP server, immutable routing table,
 // SSRF-safe HTTP transport, proxy engine, and health probes.
 type Server struct {
-	cfg        ServerConfig
-	httpServer *http.Server
-	health     *health.Registry
-	holder     *table.Holder
-	transport  *http.Transport
-	engine     *proxy.Engine
-	rlMetrics  *ratelimit.Telemetry
-	mux        *http.ServeMux
+	cfg           ServerConfig
+	httpServer    *http.Server
+	health        *health.Registry
+	holder        *table.Holder
+	transport     *http.Transport
+	engine        *proxy.Engine
+	rlMetrics     *ratelimit.Telemetry
+	healthTracker *resilience.HealthTracker
+	mux           *http.ServeMux
 
 	statusMu sync.RWMutex
 	statusFn func() syncer.SyncStatus
@@ -95,6 +97,8 @@ func NewServer(cfg ServerConfig) *Server {
 		APIKeys: gwauth.NewAPIKeyAuthenticator(nil),
 		JWT:     gwauth.NewJWTVerifier(jwksCache),
 	}
+	ht := resilience.NewHealthTracker(resilience.DefaultActiveProbeConfig(), tr, nil)
+	eng.Health = ht
 	if len(cfg.TrustedProxyCIDRs) > 0 {
 		if trusted, err := proxy.ParseTrustedProxies(cfg.TrustedProxyCIDRs); err == nil {
 			eng.TrustedProxies = trusted
@@ -113,14 +117,15 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 
 	s := &Server{
-		cfg:        cfg,
-		httpServer: srv,
-		health:     reg,
-		holder:     holder,
-		transport:  tr,
-		engine:     eng,
-		rlMetrics:  ratelimit.NewTelemetry(ratelimit.DefaultMaxMetricRoutes),
-		mux:        mux,
+		cfg:           cfg,
+		httpServer:    srv,
+		health:        reg,
+		holder:        holder,
+		transport:     tr,
+		engine:        eng,
+		rlMetrics:     ratelimit.NewTelemetry(ratelimit.DefaultMaxMetricRoutes),
+		healthTracker: ht,
+		mux:           mux,
 	}
 	mux.HandleFunc("/health/config", s.handleConfigStatus)
 	mux.HandleFunc("/health/ratelimit", s.handleRateLimitStatus)
@@ -213,8 +218,13 @@ func (s *Server) Handler() http.Handler {
 	return s.mux
 }
 
+// HealthTracker returns the active/passive upstream health tracker.
+func (s *Server) HealthTracker() *resilience.HealthTracker {
+	return s.healthTracker
+}
+
 // Serve serves requests on ln until ctx is canceled, then drains in-flight requests
-// and closes outbound idle connections cleanly.
+// within ShutdownTimeout and force-closes any straggler connections cleanly.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	errCh := make(chan error, 1)
 	go func() {
@@ -234,6 +244,10 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.cfg.ShutdownTimeout)
 		defer cancel()
 		err := s.httpServer.Shutdown(shutdownCtx)
+		if err != nil {
+			// Bounded grace exceeded: force-close remaining connections so shutdown never hangs.
+			_ = s.httpServer.Close()
+		}
 		s.transport.CloseIdleConnections()
 		if err != nil {
 			return fmt.Errorf("gateway shutdown: %w", err)
