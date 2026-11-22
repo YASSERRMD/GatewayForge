@@ -129,6 +129,7 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 	mux.HandleFunc("/health/config", s.handleConfigStatus)
 	mux.HandleFunc("/health/ratelimit", s.handleRateLimitStatus)
+	mux.HandleFunc("/health/upstreams", s.handleUpstreamHealth)
 	mux.Handle("/", eng)
 	return s
 }
@@ -170,6 +171,25 @@ func (s *Server) handleRateLimitStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(s.rlMetrics.Snapshot())
+}
+
+func (s *Server) handleUpstreamHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	// Keep active health tracker synchronized with latest snapshot pools before reporting.
+	if tbl := s.holder.Current(); tbl != nil {
+		s.healthTracker.SyncPools(tbl.Pools)
+	}
+	pools := s.healthTracker.DiagnosticsSnapshot(true)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"pools": pools,
+		"total": len(pools),
+	})
 }
 
 func (s *Server) handleConfigStatus(w http.ResponseWriter, r *http.Request) {
