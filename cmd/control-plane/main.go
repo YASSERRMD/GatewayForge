@@ -22,6 +22,7 @@ import (
 	"github.com/YASSERRMD/GatewayForge/internal/shared/events"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/netsec"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/redact"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/telemetry"
 )
 
 func main() {
@@ -108,6 +109,19 @@ func main() {
 			Store:      st,
 			SyncTokens: api.ParseSyncTokens(appCfg.GatewaySyncToken),
 		}
+		var hbStore *telemetry.HeartbeatStore
+		var aggStore *telemetry.AggregateStore
+		if redisClient != nil {
+			hbStore = telemetry.NewHeartbeatStore(redisClient, "")
+			aggStore = telemetry.NewAggregateStore(redisClient, "", telemetry.DefaultRetention)
+		}
+		telH := &api.TelemetryHandler{
+			Store:              st,
+			Sessions:           sessionMgr,
+			Heartbeats:         hbStore,
+			Aggregates:         aggStore,
+			TraceViewerBaseURL: os.Getenv("TRACE_VIEWER_BASE_URL"),
+		}
 
 		srvCfg.MountV1 = func(v1 chi.Router) {
 			authH.MountAuthRoutes(v1)
@@ -121,6 +135,7 @@ func main() {
 			polH.MountPolicyRoutes(v1)
 			pubH.MountPublicationRoutes(v1)
 			syncH.MountGatewaySyncRoutes(v1)
+			telH.MountTelemetryRoutes(v1)
 		}
 
 		srv := control.NewServer(srvCfg)

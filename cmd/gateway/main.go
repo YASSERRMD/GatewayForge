@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/YASSERRMD/GatewayForge/internal/gateway"
+	"github.com/YASSERRMD/GatewayForge/internal/gateway/proxy"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/ratelimit"
 	syncer "github.com/YASSERRMD/GatewayForge/internal/gateway/sync"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/buildinfo"
@@ -60,6 +61,36 @@ func main() {
 
 			// Publish periodic gateway instance heartbeat for control-plane convergence monitoring.
 			hbStore := telemetry.NewHeartbeatStore(rc, "")
+			aggStore := telemetry.NewAggregateStore(rc, "", telemetry.DefaultRetention)
+			sampleCh := make(chan telemetry.TrafficSample, 2048)
+			go func() {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case s := <-sampleCh:
+						_ = aggStore.Record(ctx, s)
+					}
+				}
+			}()
+			srv.SetOutcomeHook(func(out proxy.RequestOutcome) {
+				if out.OrgID == "" {
+					return
+				}
+				select {
+				case sampleCh <- telemetry.TrafficSample{
+					Timestamp:  out.Timestamp,
+					OrgID:      out.OrgID,
+					RouteID:    out.RouteID,
+					ServiceID:  out.ServiceID,
+					Status:     out.Status,
+					Outcome:    out.Outcome,
+					DurationMS: float64(out.Duration.Microseconds()) / 1000.0,
+				}:
+				default:
+					// Drop silently under extreme saturation rather than blocking the proxy hot path.
+				}
+			})
 			instanceID, _ := os.Hostname()
 			if instanceID == "" {
 				instanceID = "gateway-local"
