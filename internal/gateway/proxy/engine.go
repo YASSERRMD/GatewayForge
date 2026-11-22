@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
 
 	gwauth "github.com/YASSERRMD/GatewayForge/internal/gateway/auth"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/balancer"
@@ -16,9 +18,50 @@ import (
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/ratelimit"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/resilience"
 	"github.com/YASSERRMD/GatewayForge/internal/gateway/table"
+	"github.com/YASSERRMD/GatewayForge/internal/shared/logging"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/policy"
 	"github.com/YASSERRMD/GatewayForge/internal/shared/snapshot"
 )
+
+// RequestOutcome summarizes one completed gateway request for structured logging, metrics, and aggregation.
+type RequestOutcome struct {
+	Timestamp  time.Time
+	OrgID      string
+	RouteID    string
+	ServiceID  string
+	PathPrefix string
+	Method     string
+	Status     int
+	Outcome    string
+	Duration   time.Duration
+	RequestID  string
+	TraceID    string
+}
+
+type statusCaptureWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusCaptureWriter) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusCaptureWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *statusCaptureWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
 
 // Engine executes reverse-proxy requests against the active immutable routing table.
 type Engine struct {
@@ -33,6 +76,8 @@ type Engine struct {
 	Health         *resilience.HealthTracker
 	CircuitBreaker *resilience.CircuitBreakerRegistry
 	Bulkhead       *resilience.BulkheadRegistry
+	Logger         *slog.Logger
+	OnOutcome      func(RequestOutcome)
 }
 
 // NewEngine creates a streaming reverse-proxy Engine backed by holder.
@@ -56,9 +101,58 @@ func NewEngine(holder *table.Holder, transport http.RoundTripper, pol Destinatio
 
 // ServeHTTP matches the request against the immutable snapshot and streams it to the selected upstream.
 func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	cw := &statusCaptureWriter{ResponseWriter: w}
+	w = cw
 	r, corr := AttachCorrelation(w, r)
 
 	tbl := e.Holder.Current()
+	var matchedRoute snapshot.Route
+	var matched bool
+	defer func() {
+		status := cw.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		dur := time.Since(start)
+		routeID, serviceID, prefix := "", "", ""
+		if matched {
+			routeID = matchedRoute.ID
+			serviceID = matchedRoute.ServiceID
+			prefix = matchedRoute.PathPrefix
+		}
+		outcome := logging.ClassifyOutcome(status)
+		if e.Logger != nil {
+			logging.LogAccess(e.Logger, logging.AccessRecord{
+				Timestamp:  start.UTC(),
+				RequestID:  corr.RequestID,
+				TraceID:    corr.TraceID,
+				OrgID:      tbl.OrgID,
+				RouteID:    routeID,
+				ServiceID:  serviceID,
+				Method:     r.Method,
+				PathPrefix: prefix,
+				Status:     status,
+				Outcome:    outcome,
+				DurationMS: float64(dur.Microseconds()) / 1000.0,
+			})
+		}
+		if e.OnOutcome != nil {
+			e.OnOutcome(RequestOutcome{
+				Timestamp:  start.UTC(),
+				OrgID:      tbl.OrgID,
+				RouteID:    routeID,
+				ServiceID:  serviceID,
+				PathPrefix: prefix,
+				Method:     r.Method,
+				Status:     status,
+				Outcome:    outcome,
+				Duration:   dur,
+				RequestID:  corr.RequestID,
+				TraceID:    corr.TraceID,
+			})
+		}
+	}()
 
 	// Evaluate browser CORS preflight before auth on routes with a CORS policy.
 	if gwcors.IsPreflight(r) {
@@ -66,6 +160,8 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		preMatch := tbl.Matcher.Match(r.Host, reqMethod, r.URL.Path)
 		if preMatch.Matched {
 			if corsCfg, hasCORS := gwcors.ResolveEffective(preMatch.Route.Policies); hasCORS {
+				matchedRoute = preMatch.Route
+				matched = true
 				gwcors.HandlePreflight(w, r, corsCfg)
 				return
 			}
@@ -84,6 +180,8 @@ func (e *Engine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		WriteGatewayError(w, r, http.StatusNotFound, CodeRouteNotFound, "no configured route matches this request")
 		return
 	}
+	matchedRoute = match.Route
+	matched = true
 
 	// Apply CORS response headers for matched routes (including error responses).
 	if corsCfg, hasCORS := gwcors.ResolveEffective(match.Route.Policies); hasCORS {
