@@ -22,4 +22,5 @@
 | 11 — Management UI | `phase/11-management-ui` | 2026-11-22 12:57 | 2026-11-22 13:21 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/11 | `036b2c0727813346dbc93be357a68ad38ab407de` | Merged |
 | 12 — Console & OpenAPI | `phase/12-api-console-import` | 2026-11-22 13:22 | 2026-11-22 14:29 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/12 | `052254beb59781533c11d63d02ec50d5d792b09e` | Merged |
 | 13 — Release Workflow | `phase/13-release-workflow` | 2026-11-22 14:30 | 2026-11-22 19:32 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/13 | `4085bc475d0ab68266ef339b7f1da7ec94f0cb2d` | Merged |
-| 14 — Security & Chaos | `phase/14-security-hardening` | 2026-11-22 19:33 | TBD | In progress | TBD | TBD | In progress |
+| 14 — Security & Chaos | `phase/14-security-hardening` | 2026-11-22 19:33 | 2026-11-22 19:50 | 11 | https://github.com/YASSERRMD/GatewayForge/pull/14 | `824817be4b0d4a99323f16241464bc7d5d1d1c83` | Merged |
+| 15 — Packaging & Benchmark | `phase/15-release-benchmark` | 2026-11-22 19:51 | TBD | In progress | TBD | TBD | In progress |
